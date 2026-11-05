@@ -1,0 +1,26 @@
+# Core (CPU wheels: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu)
+torch>=2.5
+torchvision>=0.20
+numpy>=1.26
+scipy>=1.12
+matplotlib>=3.8
+pillow>=10
+tqdm>=4.66
+
+# Notebooks
+jupyterlab>=4
+ipywidgets>=8
+nbformat>=5.10
+nbconvert>=7.16
+ipykernel>=6.29
+
+# Day 1 B4, Day 2 B4, Day 3 B4 (pretrained zoo and foundation models; notebooks degrade gracefully without them)
+timm>=1.0
+transformers>=4.45
+open_clip_torch>=2.26
+
+# Optional
+opencv-contrib-python>=4.10     # Selective Search demo in D2-01
+segmentation-models-pytorch>=0.4  # library U-Net comparison in D3-02
+torchmetrics>=1.4               # library mAP cross-check
+onnx>=1.16                      # export demo in D2-04

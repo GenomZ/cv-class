@@ -1,0 +1,7 @@
+.venv/
+data/
+notebooks/solutions/_executed/
+**/__pycache__/
+.ipynb_checkpoints/
+*.pt
+*.onnx
