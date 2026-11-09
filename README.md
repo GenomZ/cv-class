@@ -11,6 +11,8 @@ and leave the key lines for students to write.
 | 2 | Object detection | `D2-01` boxes, IoU, mAP · `D2-02` two-stage (anchors, RPN, RoIAlign) · `D2-03` one-stage (FPN, focal loss) · `D2-04` modern detectors |
 | 3 | Segmentation and the frontier | `D3-01` segmentation basics · `D3-02` U-Net · `D3-03` Mask R-CNN · `D3-04` ViT, DINOv2, CLIP, SAM |
 
+**Continuing this work?** Read [HANDOVER.md](HANDOVER.md) first: current state, conventions, and the open tasks staged for implementation.
+
 ## Layout
 
 ```
