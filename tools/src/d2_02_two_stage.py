@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, FancyBboxPatch
 import torch, torch.nn as nn, torch.nn.functional as F
 import torchvision
-from cvcourse import viz, boxes, shapes, tests, torchkit, day2
+from cvcourse import viz, boxes, shapes, tests, torchkit, day2, labs
 
 %matplotlib inline
 plt.rcParams["figure.dpi"] = 90
@@ -55,7 +55,8 @@ CELLS = [
 
     Faster R-CNN (Ren et al. 2015) is the model this notebook takes apart. One backbone computes
     a feature map *once*; a small **Region Proposal Network** slides over it and scores a fixed
-    set of reference boxes (**anchors**) for "objectness"; the best few hundred become
+    set of reference boxes (**anchors**) for "objectness" (the probability that the box holds *some*
+    object, whatever its class); the best few hundred become
     **proposals**; **RoIAlign** cuts a fixed-size feature tile out of the map for each proposal;
     a second head classifies each tile and refines its box. Two stages: *where might objects be?*
     then *what exactly is there?*
@@ -165,6 +166,12 @@ CELLS = [
         print(f"{st:>7} {f'{512 // st} x {512 // st}':>12} {n:>14,d}")
     print(f"{'total':>7} {'':>12} {tot:>14,d}   for a 512 x 512 image - and maybe 5 of them contain an object")
     """),
+    md(r"""
+    Left: the family of one cell - colour is the scale, line style the ratio; all nine share the
+    centre (star). Right: that family is repeated at every cell of the grid. The table is the
+    point to remember: anchors grow with $1/s^2$, so the fine stride-8 level alone holds three
+    quarters of the ~48 000 candidates.
+    """),
 
     # ------------------------------------------------------------------ 2
     md(r"""
@@ -179,9 +186,26 @@ CELLS = [
     * **low-quality matches**: every GT also makes its single best anchor positive, even if that IoU
       is below 0.7 - otherwise small or oddly shaped objects would get no positive anchor at all.
 
+    0.7 / 0.3 are the paper's thresholds, chosen for ~800 px images. They are arguments of the
+    function, and further down you will see why our 128 px images need 0.5 / 0.3 instead.
+    """),
+    md(r"""
+    ### Lab · Anchor matching
+
+    **Predict first:** two objects in a 256 px image, stride 16, 3 scales x 3 ratios = 2304 anchors,
+    the paper's 0.7 / 0.3 rule. How many anchors are positive: about 6, 60 or 600?
+    Check in the lab, then work through its "Try this" list (8-10 minutes).
+    """),
+    code(r"""
+    labs.show("anchor-matching")
+    """),
+    md(r"""
     ### Exercise 2 · `match_anchors`
 
-    Return `(matched_gt_index, labels)` for `anchors (N, 4)` and `gt (G, 4)`. Use `boxes.box_iou`.
+    Return `(matched_gt_index, labels)` for `anchors (N, 4)` and `gt (G, 4)`: two integer arrays of
+    length `N`, labels in {1, 0, -1}; `matched_gt_index` only matters where `labels == 1`. Use
+    `boxes.box_iou`. The green anchors in the lab are the `labels == 1` entries; the dashed "forced"
+    ones come from the `allow_low_quality` branch.
     """),
     exercise(
         stub=r"""
@@ -240,8 +264,10 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
-    With the 0.7 rule only the forced "best anchor per GT" matches survive here: on a 128 px image
-    a stride-8 anchor can be 4 px off-centre, and 4 px on a 24 px object already pushes IoU below 0.7.
+    With the 0.7 rule the four objects get only 5 positive anchors: two objects reach 0.7 with one
+    or two anchors, the other two only through the forced "best anchor per GT" rule (the dashed
+    anchors of the lab). On a 128 px image a stride-8 anchor can be 4 px off-centre, and 4 px on a
+    24 px object already pushes IoU below 0.7.
     Faster R-CNN's thresholds assume ~800 px images where objects are large relative to the stride;
     for our tiny images we use **0.5 / 0.3** (RetinaNet uses 0.5 / 0.4). Anchor design and matching
     thresholds are dataset-dependent hyper-parameters - one of the motivations for anchor-free detectors.
@@ -269,10 +295,22 @@ CELLS = [
     decoding with $\exp$. Decoding is the exact inverse.
     """),
     md(r"""
+    ### Lab · Box encoding
+
+    **Predict first:** take the same anchor and ground truth and double both (the same scene at twice
+    the resolution). Which of $t_x, t_y, t_w, t_h$ change? Check with the "x2 scale both boxes"
+    button, then work through the "Try this" list (6-8 minutes).
+    """),
+    code(r"""
+    labs.show("box-encoding")
+    """),
+    md(r"""
     ### Exercise 3 · `encode` / `decode`
 
-    Both take aligned `(N, 4)` xyxy arrays. Convert with `boxes.xyxy_to_cxcywh` /
-    `boxes.cxcywh_to_xyxy`.
+    Both take aligned `(N, 4)` xyxy arrays and return `(N, 4)` arrays (`encode`: deltas
+    $(t_x, t_y, t_w, t_h)$, `decode`: xyxy boxes). Convert with `boxes.xyxy_to_cxcywh` /
+    `boxes.cxcywh_to_xyxy`. The checker tests what the lab's "snap deltas to the target" button
+    showed: `decode(encode(g, a), a)` gives back `g`.
     """),
     exercise(
         stub=r"""
@@ -337,6 +375,10 @@ CELLS = [
     print("round trip decode(encode(g, a), a) == g:", np.allclose(boxes.decode_boxes(d[None], a[None])[0], g))
     """),
     md(r"""
+    Left: the arrow is the centre shift that $t_x, t_y$ encode, in units of the anchor's size (deltas in
+    the title). Middle: on a log axis, growing x2 and shrinking /2 give targets of equal size
+    with opposite signs; the naive ratio (grey) does not.
+
     **Smooth-L1** (Huber) is the box loss of the R-CNN family: quadratic for errors below $\beta$
     (smooth gradient near the optimum), linear above (a badly matched anchor cannot dominate the
     batch the way it would with L2). Faster R-CNN's RPN uses $\beta = 1/9$.
@@ -447,6 +489,13 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Top row: before training the highest-scoring anchors are arbitrary boxes. Middle: after training
+    the objectness map is bright only on the shapes, background cells stay dark. Bottom: the
+    best-scoring decoded proposals now hug the green ground truth, although no anchor matched it
+    exactly - the deltas moved them there. A few lower-scoring duplicates are still off; NMS and the
+    second stage deal with those.
+    """),
+    md(r"""
     ### From 2304 scored anchors to a handful of proposals
 
     The RPN's raw output is one decoded box per anchor. torchvision's `RegionProposalNetwork`
@@ -528,13 +577,26 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    ### Lab · RoI pooling vs RoIAlign
+
+    **Predict first:** a RoIAlign sample point lies a quarter of a cell to the right of and a quarter
+    of a cell below the centre of a feature cell. What are its four bilinear weights? Hover a sample
+    in the lab to check, then work through the "Try this" list (8 minutes).
+    """),
+    code(r"""
+    labs.show("roi-align")
+    """),
+    md(r"""
     ### Exercise 5 · RoIAlign in PyTorch
 
     Two functions. `bilinear(feature, y, x)` interpolates a `(C, H, W)` map at float coordinates
-    (the clamping is given). `roi_align(feature, rois, output_size, spatial_scale, sampling_ratio)`
-    loops over RoIs: scale the box to feature coordinates, shift by -0.5 (`aligned=True`: pixel *centres*),
+    `y`, `x` (tensors of the same shape) and returns `(C, *y.shape)` (the clamping is given).
+    `roi_align(feature, rois, output_size, spatial_scale, sampling_ratio)` returns `(K, C, P, P)`
+    and loops over RoIs: scale the box to feature coordinates, shift by -0.5 (`aligned=True`: pixel *centres*),
     build the `P*s` sample coordinates along y and along x, sample the full grid, and average the
-    `s x s` samples of every bin. The checker compares with `torchvision.ops.roi_align`.
+    `s x s` samples of every bin. These are exactly the numbers in the lab's calculation box: the
+    "-0.5 -> index" line, then four neighbours times their weights. The checker compares with
+    `torchvision.ops.roi_align`.
     """),
     exercise(
         stub=r"""
@@ -733,11 +795,13 @@ CELLS = [
     * **Anchors** = a fixed family of scales x ratios at every feature-map cell; a 512 px image
       easily gets 50 000 of them. Networks predict *corrections* to anchors.
     * **Matching**: IoU >= 0.7 positive, < 0.3 negative, in between ignored, plus the best anchor of
-      every GT. ~1% of anchors are positive, hence minibatch sampling (two-stage) or focal loss (one-stage).
+      every GT (0.5 / 0.3 for our 128 px images). ~1% of anchors are positive, hence minibatch sampling
+      (two-stage) or focal loss (one-stage).
     * **Encoding**: $t_x, t_y$ = centre offset / anchor size, $t_w, t_h$ = log size ratio; smooth-L1.
     * **RPN**: 3x3 conv + two 1x1 convs (A objectness, 4A deltas); proposals = decode, clip, top-k, NMS, top-N.
-    * **RoIAlign** samples bilinearly at exact positions; RoI pooling rounds twice and loses up to half a
-      stride of precision.
+    * **RoIAlign** samples bilinearly at exact positions; RoI pooling rounds twice - the box edges (up to
+      half a stride) and then the bin borders (up to about one more cell) - and its output jumps instead
+      of following the box.
     * **Faster R-CNN loss** = RPN objectness + RPN box + RoI classification + RoI box.
     * Fine-tuning a library detector = replace the predictor for $K+1$ classes and train with a small LR.
 

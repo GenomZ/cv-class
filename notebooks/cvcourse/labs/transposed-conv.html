@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transposed convolution</title>
+<meta name="lab-notebook" content="D3-01">
+<meta name="lab-summary" content="Step through a transposed convolution: every input value stamps a scaled copy of the kernel into the output. Count the overlaps and watch the checkerboard appear; compare with resize + conv.">
+<meta name="lab-height" content="860">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .stack { display: flex; flex-direction: column; gap: 10px; width: 150px; }
+  .player { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .player .btn { padding: 4px 9px; min-width: 34px; }
+  #info { min-height: 3em; margin: 10px 0 0; font-size: 13px; color: var(--ink-2); }
+  #info b { color: var(--ink); }
+  #info code { font: 12.5px ui-monospace, Consolas, monospace; color: var(--ink); }
+  .off { opacity: 0.45; pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Transposed convolution = scatter-add</h1><span class="lab-tag">D3-01 · section 4</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A normal convolution <i>gathers</i> a window into one output pixel. A transposed convolution <i>scatters</i>:
+    every input value is multiplied by the whole kernel and <b>added</b> into the output at a stride-spaced position.
+    Step through it, hover an output pixel to see who painted it, and click input or kernel cells to change them.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <div class="stack">
+          <figure class="lab-fig"><figcaption id="cap-x">input x</figcaption><div id="f-x"></div></figure>
+          <figure class="lab-fig"><figcaption id="cap-k">kernel w</figcaption><div id="f-k"></div></figure>
+        </div>
+        <figure class="lab-fig" style="width:290px;max-width:100%"><figcaption id="cap-y">output y</figcaption><div id="f-y"></div></figure>
+        <figure class="lab-fig" style="width:210px;max-width:100%"><figcaption id="cap-c">stamps per output pixel</figcaption><div id="f-c"></div>
+          <div class="legend" id="legend" style="margin-top:6px;max-width:210px"></div></figure>
+      </div>
+      <p id="info"></p>
+    </div>
+    <div class="lab-controls">
+      <div id="c-method"></div>
+      <div id="c-step" class="ctl"></div>
+      <div id="c-in" class="lab-controls row" style="gap:10px 14px"></div>
+      <div id="c-k" class="lab-controls row" style="gap:10px 14px"></div>
+      <div id="c-geo" class="lab-controls row" style="gap:10px 14px"></div>
+      <div class="formula" id="formula"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Kernel 3, stride 2, all ones. Before pressing play: which output pixels will receive 4 stamps, which 2, which 1? Then hover them.
+        <details><summary>why</summary><p>Stamps start every 2 pixels but are 3 wide, so they overlap by one row and one column. Pixels where
+          two rows of stamps <i>and</i> two columns of stamps meet get 4, edges of a single overlap get 2, the rest 1. That periodic 1-2-4
+          pattern is the checkerboard: it is baked into every map this layer produces, before any learning.</p></details></li>
+      <li>Keep stride 2 and try kernel 4, then kernel 2. Find the rule for when the count map is uniform.
+        <details><summary>answer</summary><p>Uniform (away from the border) exactly when k is a multiple of s: k = 4 gives 4 everywhere,
+          k = 2 gives 1 everywhere (the U-Net decoder's choice: no overlap at all). With k = 3, s = 2, or k = 4, s = 3, the overlap is uneven.</p></details></li>
+      <li>Set kernel 3, stride 2, kernel <b>bilinear</b>, input all ones. The count map is still uneven; is the output?
+        Now pick kernel <b>random</b>.
+        <details><summary>why</summary><p>The bilinear weights (0.5, 1, 0.5) are chosen so the overlapping halves add up to 1: the interior
+          of the output is flat although the counts are not. A learned kernel has no reason to keep that balance, so the pattern
+          returns as soon as the weights are random. Uneven overlap makes artefacts likely; good weights can hide them, training rarely does.</p></details></li>
+      <li>Input <b>single 1</b>, then stride 3 with kernel 2. What does one input pixel paint, and what happens between the stamps?
+        <details><summary>why</summary><p>A single 1 paints exactly one copy of the kernel. With k &lt; s the stamps do not touch: the zeros
+          between them are output pixels no input ever reaches (count 0), the worst possible checkerboard.</p></details></li>
+      <li>Switch the method to <b>nearest + conv 3x3</b> (input all ones), then <b>bilinear + conv 3x3</b>. Compare with the transposed conv.
+        Finally return to transposed, kernel 4, stride 2 and set padding 1: which pixels disappear, and what is the output size now?
+        <details><summary>why</summary><p>Resize + conv: every output pixel sums exactly 9 taps of the upsampled map, so a constant input gives
+          a flat interior (lower values only where the conv's zero padding enters). No pattern by construction. In a transposed conv,
+          padding p <i>crops</i> p pixels from every side: (4 - 1) * 2 - 2 + 4 = 8 = 2n, the standard ConvTranspose2d(k=4, s=2, p=1) that exactly doubles.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const S = Lab.params({ input: "ones", n: 4, kernel: "ones", k: 3, s: 2, p: 0, method: "transposed", step: 6 });
+  const NB = [[1, 2, 0], [0, 1, 3], [2, 0, 1]];                     // the input of the notebook's animation
+  const NBK = [[1, 1, 1], [1, 2, 1], [1, 1, 1]];                    // and its kernel
+  const fmt = (v) => (Math.abs(v) < 1e-9 ? "0" : Number.isInteger(v) ? String(v) : String(+v.toFixed(2)));
+  const fmtK = (v) => (Number.isInteger(v) ? String(v) : String(+v.toFixed(3)));
+  const tri = (k) => { const f = Math.ceil(k / 2), c = (k - 1) / 2; return Array.from({ length: k }, (_, i) => 1 - Math.abs(i - c) / f); };
+
+  function makeInput(name, n) {
+    if (name === "notebook") return { n: 3, x: NB.flat() };
+    const x = new Array(n * n).fill(0);
+    if (name === "ones") x.fill(1);
+    else if (name === "single") x[Math.floor(n / 2) * n + Math.floor((n - 1) / 2)] = 1;
+    else { const rnd = Lab.rng(7 + n); for (let i = 0; i < n * n; i++) x[i] = Math.floor(rnd() * 4); }
+    return { n, x };
+  }
+  function makeKernel(name, k) {
+    if (name === "notebook") return { k: 3, w: NBK.flat() };
+    if (name === "bilinear") { const t = tri(k); return { k, w: t.flatMap((a) => t.map((b) => a * b)) }; }
+    if (name === "random") { const rnd = Lab.rng(3 + k); return { k, w: Array.from({ length: k * k }, () => +(0.25 + rnd() * 1.75).toFixed(1)) }; }
+    return { k, w: new Array(k * k).fill(1) };
+  }
+  if (!["ones", "single", "random", "notebook"].includes(S.input)) S.input = "ones";
+  if (!["ones", "bilinear", "random", "notebook"].includes(S.kernel)) S.kernel = "ones";
+  S.n = Lab.clamp(Math.round(S.n), 2, 4); S.k = Lab.clamp(Math.round(S.k), 2, 4); S.s = Lab.clamp(Math.round(S.s), 1, 3); S.p = Lab.clamp(Math.round(S.p), 0, 2);
+  let X = makeInput(S.input, S.n); S.n = X.n;
+  let K = makeKernel(S.kernel, S.k); S.k = K.k;
+  let hover = null;                                                  // {fig: "y" | "c", a, b} in full-grid coordinates
+
+  // ---- maths: full (uncropped) scatter-add, the crop by p, and the resize + conv alternative
+  function transposed(t) {                                           // first t stamps (row-major input order)
+    const { n, x } = X, { k, w } = K, s = S.s, F = (n - 1) * s + k;
+    const y = new Float64Array(F * F), cnt = new Int32Array(F * F);
+    for (let idx = 0; idx < Math.min(t, n * n); idx++) {
+      const i = Math.floor(idx / n), j = idx % n;
+      for (let u = 0; u < k; u++) for (let v = 0; v < k; v++) { const o = (i * s + u) * F + j * s + v; y[o] += x[idx] * w[u * k + v]; cnt[o] += 1; }
+    }
+    return { F, y, cnt };
+  }
+  function upsample(mode) {                                          // F.interpolate(scale_factor=s, mode, align_corners=False)
+    const { n, x } = X, s = S.s, M = n * s, u = new Float64Array(M * M);
+    const src = (d) => Math.max(0, (d + 0.5) / s - 0.5);
+    for (let a = 0; a < M; a++) for (let b = 0; b < M; b++) {
+      if (mode === "nearest") { u[a * M + b] = x[Math.floor(a / s) * n + Math.floor(b / s)]; continue; }
+      const ya = src(a), xb = src(b), y0 = Math.floor(ya), x0 = Math.floor(xb), y1 = Math.min(y0 + 1, n - 1), x1 = Math.min(x0 + 1, n - 1);
+      const wy = ya - y0, wx = xb - x0, g = (r, c) => x[Math.min(r, n - 1) * n + Math.min(c, n - 1)];
+      u[a * M + b] = (g(y0, x0) * (1 - wx) + g(y0, x1) * wx) * (1 - wy) + (g(y1, x0) * (1 - wx) + g(y1, x1) * wx) * wy;
+    }
+    return { M, u };
+  }
+  function resizeConv(mode) {                                        // then F.conv2d with a 3x3 all-ones kernel, padding 1
+    const { M, u } = upsample(mode), y = new Float64Array(M * M), taps = new Int32Array(M * M);
+    for (let a = 0; a < M; a++) for (let b = 0; b < M; b++) for (let da = -1; da <= 1; da++) for (let db = -1; db <= 1; db++) {
+      const r = a + da, c = b + db;
+      if (r >= 0 && c >= 0 && r < M && c < M) { y[a * M + b] += u[r * M + c]; taps[a * M + b] += 1; }
+    }
+    return { M, u, y, taps };
+  }
+
+  // ---- figures
+  const cx = Lab.canvas("#f-x", 150, 150), ck = Lab.canvas("#f-k", 150, 150);
+  const Y = 290, C = 210;                                           // output and count canvas sizes
+  const cy = Lab.canvas("#f-y", Y, Y), cc = Lab.canvas("#f-c", C, C);
+
+  // ---- controls
+  const method = Lab.select("#c-method", { label: "upsampling method", value: S.method,
+    options: [{ value: "transposed", label: "transposed convolution (scatter-add)" }, { value: "nearest", label: "nearest upsample x s, then conv 3x3" }, { value: "bilinear", label: "bilinear upsample x s, then conv 3x3" }],
+    onChange: (v) => { S.method = v; stop(); redraw(); } });
+  const stepCtl = Lab.slider("#c-step", { label: "step t (stamps added)", min: 0, max: S.n * S.n, value: S.step, fmt: (v) => `${v} / ${X.n * X.n}`, onInput: (v) => { S.step = v; stop(); redraw(); } });
+  const player = Lab.el("div", { class: "player" }); Lab.$("#c-step").append(player);
+  Lab.button(player, "|<", () => { stop(); setStep(0); });
+  Lab.button(player, "<", () => { stop(); setStep(S.step - 1); });
+  const playBtn = Lab.button(player, "play", () => (timer ? stop() : play()), "primary");
+  Lab.button(player, ">", () => { stop(); setStep(S.step + 1); });
+  Lab.button(player, ">|", () => { stop(); setStep(X.n * X.n); });
+  let timer = null;
+  function setStep(t) { S.step = Lab.clamp(t, 0, X.n * X.n); stepCtl.input.max = X.n * X.n; stepCtl.set(S.step); redraw(); }
+  function play() { if (S.step >= X.n * X.n) setStep(0); playBtn.textContent = "pause"; timer = setInterval(() => { if (S.step >= X.n * X.n) return stop(); setStep(S.step + 1); }, 650); }
+  function stop() { if (timer) clearInterval(timer); timer = null; playBtn.textContent = "play"; }
+
+  const inSel = Lab.select("#c-in", { label: "input x", value: S.input, options: [{ value: "ones", label: "all ones" }, { value: "single", label: "single 1" }, { value: "random", label: "random 0-3" }, { value: "notebook", label: "notebook example" }, { value: "custom", label: "custom (clicked)" }],
+    onChange: (v) => { if (v === "custom") return; S.input = v; X = makeInput(v, v === "notebook" ? 3 : S.n); S.n = X.n; nSeg.set(S.n); setStep(X.n * X.n); } });
+  const nSeg = Lab.segmented("#c-in", { label: "size n", options: [2, 3, 4], value: S.n, onChange: (v) => { S.n = v; if (S.input === "notebook" || S.input === "custom") { S.input = "ones"; inSel.set("ones"); } X = makeInput(S.input, v); setStep(Math.min(S.step, v * v)); } });
+  const kSel = Lab.select("#c-k", { label: "kernel w", value: S.kernel, options: [{ value: "ones", label: "all ones" }, { value: "bilinear", label: "bilinear" }, { value: "random", label: "random" }, { value: "notebook", label: "notebook example" }, { value: "custom", label: "custom (clicked)" }],
+    onChange: (v) => { if (v === "custom") return; S.kernel = v; K = makeKernel(v, v === "notebook" ? 3 : S.k); S.k = K.k; kSeg.set(S.k); redraw(); } });
+  const kSeg = Lab.segmented("#c-k", { label: "size k", options: [2, 3, 4], value: S.k, onChange: (v) => { S.k = v; if (S.kernel === "notebook" || S.kernel === "custom") { S.kernel = "ones"; kSel.set("ones"); } K = makeKernel(S.kernel, v); redraw(); } });
+  Lab.segmented("#c-geo", { label: "stride s", options: [1, 2, 3], value: S.s, onChange: (v) => { S.s = v; redraw(); } });
+  const pSeg = Lab.segmented("#c-geo", { label: "padding p (crop)", options: [0, 1, 2], value: S.p, onChange: (v) => { S.p = v; redraw(); } });
+
+  // click a cell to change it
+  const CYCLE_X = [0, 1, 2, 3], CYCLE_W = [0, 0.5, 1, 2];
+  const next = (cyc, v) => { const i = cyc.indexOf(v); return cyc[(i + 1) % cyc.length] ?? cyc[0]; };
+  Lab.pointer(cx, { down: (p) => { const n = X.n, i = Math.floor(p.y / (150 / n)), j = Math.floor(p.x / (150 / n)); if (i < n && j < n) { X.x[i * n + j] = next(CYCLE_X, X.x[i * n + j]); S.input = "custom"; inSel.set("custom"); redraw(); } } });
+  Lab.pointer(ck, { down: (p) => { if (S.method !== "transposed") return; const k = K.k, u = Math.floor(p.y / (150 / k)), v = Math.floor(p.x / (150 / k)); if (u < k && v < k) { K.w[u * k + v] = next(CYCLE_W, K.w[u * k + v]); S.kernel = "custom"; kSel.set("custom"); redraw(); } } });
+  const hov = (fig, size) => ({ hover: (p) => { const G = gridSize(); hover = { fig, a: Math.floor(p.y / (size / G)), b: Math.floor(p.x / (size / G)) }; redraw(); }, leave: () => { hover = null; redraw(); } });
+  Lab.pointer(cy, hov("y", Y)); Lab.pointer(cc, hov("c", C));
+  const gridSize = () => (S.method === "transposed" ? (X.n - 1) * S.s + K.k : X.n * S.s);
+
+  // ---- drawing helpers
+  const seqMax = (arr) => Math.max(1e-9, ...arr);
+  function veil(g, x, y, w, h, a = 0.62) { g.save(); g.fillStyle = Lab.alpha("--surface", a); g.fillRect(x, y, w, h); g.restore(); }
+  function outline(g, x, y, w, h, color, dash = []) { g.save(); g.strokeStyle = color; g.lineWidth = 2.5; g.setLineDash(dash); g.strokeRect(x + 1.25, y + 1.25, w - 2.5, h - 2.5); g.restore(); }
+
+  window.labDebug = () => { draw(); const T = transposed(X.n * X.n), R = { n: X.n, k: K.k, s: S.s, p: S.p, x: X.x, w: K.w, F: T.F, y: Array.from(T.y), cnt: Array.from(T.cnt) };
+    for (const m of ["nearest", "bilinear"]) { const r = resizeConv(m); R[m] = { M: r.M, u: Array.from(r.u), y: Array.from(r.y) }; }
+    R.formula = Lab.$("#formula").textContent; R.capY = Lab.$("#cap-y").textContent; return R; };
+
+  function draw() {
+    const { n, x } = X, { k, w } = K, s = S.s, p = S.p, tr = S.method === "transposed";
+    const total = n * n; S.step = Lab.clamp(S.step, 0, total); stepCtl.input.max = total; stepCtl.set(S.step);
+    Lab.$("#c-step").classList.toggle("off", !tr);
+    Lab.$("#c-k").classList.toggle("off", !tr); pSeg.el.classList.toggle("off", !tr);
+    const hl = Lab.color("--hl");
+    const cur = tr && S.step > 0 ? S.step - 1 : -1, ci = Math.floor(cur / n), cj = cur % n;
+    const full = transposed(total), run = transposed(S.step), F = full.F;
+
+    // who painted the hovered output pixel?
+    let contrib = [];
+    if (tr && hover && hover.a >= 0 && hover.b >= 0 && hover.a < F && hover.b < F) {
+      for (let idx = 0; idx < total; idx++) { const i = Math.floor(idx / n), j = idx % n, u = hover.a - i * s, v = hover.b - j * s; if (u >= 0 && v >= 0 && u < k && v < k) contrib.push({ idx, i, j, u, v }); }
+    }
+
+    // input x
+    const xm = seqMax(x.map(Math.abs)), cs = 150 / n;
+    cx.clear();
+    Lab.cells(cx.ctx, x, n, n, 0, 0, 150, 150, { color: (v) => Lab.sequentialRGB(0.12 + 0.88 * v / xm), fmt, size: 15 });
+    if (tr) for (let idx = S.step; idx < total; idx++) veil(cx.ctx, (idx % n) * cs + 1, Math.floor(idx / n) * cs + 1, cs - 2, cs - 2, 0.55);
+    if (cur >= 0 && !contrib.length) outline(cx.ctx, cj * cs, ci * cs, cs, cs, hl);
+    for (const c of contrib) outline(cx.ctx, c.j * cs, c.i * cs, cs, cs, hl);
+    Lab.$("#cap-x").innerHTML = `input x <small>${n} x ${n}, click to edit${tr ? "; faded = not stamped yet" : ""}</small>`;
+
+    // kernel (or the fixed 3x3 conv kernel of the alternative)
+    ck.clear();
+    if (tr) {
+      const wm = seqMax(w.map(Math.abs)), ks = 150 / k;
+      Lab.cells(ck.ctx, w, k, k, 0, 0, 150, 150, { color: (v) => Lab.sequentialRGB(0.12 + 0.88 * v / wm), fmt: fmtK, size: k === 4 ? 12 : 14 });
+      for (const c of contrib) outline(ck.ctx, c.v * ks, c.u * ks, ks, ks, hl, [4, 3]);
+      Lab.$("#cap-k").innerHTML = `kernel w <small>${k} x ${k}, click to edit</small>`;
+    } else {
+      Lab.cells(ck.ctx, new Array(9).fill(1), 3, 3, 0, 0, 150, 150, { color: () => Lab.sequentialRGB(0.5), fmt, size: 15 });
+      Lab.$("#cap-k").innerHTML = `conv kernel <small>3 x 3 ones, padding 1 (fixed)</small>`;
+    }
+
+    const legend = [];
+    if (tr) {
+      // output y: running sum on the full grid; the ring of width p is cropped
+      const ym = seqMax(Array.from(full.y, Math.abs)), cyz = Y / F, g = cy.ctx;
+      cy.clear();
+      const shown = Array.from(run.y, (v, o) => (run.cnt[o] ? v : NaN));
+      Lab.cells(g, shown, F, F, 0, 0, Y, Y, { color: (v) => Lab.sequentialRGB(0.12 + 0.88 * Math.abs(v) / ym), fmt, gap: F > 10 ? 1 : 2 });
+      if (p > 0) for (let a = 0; a < F; a++) for (let b = 0; b < F; b++) if (a < p || b < p || a >= F - p || b >= F - p) veil(g, b * cyz, a * cyz, cyz, cyz, 0.7);
+      if (p > 0 && F - 2 * p > 0) outline(g, p * cyz, p * cyz, (F - 2 * p) * cyz, (F - 2 * p) * cyz, Lab.color("--ink-2"), [5, 4]);
+      if (cur >= 0 && !contrib.length) outline(g, cj * s * cyz, ci * s * cyz, k * cyz, k * cyz, hl);
+      if (contrib.length && hover.fig === "y") outline(g, hover.b * cyz, hover.a * cyz, cyz, cyz, hl);
+      const Fo = F - 2 * p;
+      Lab.$("#cap-y").innerHTML = `output y <small>${Fo > 0 ? `${Fo} x ${Fo}` : "empty"}${p ? ` (full ${F} x ${F}, shaded ring cropped by p = ${p})` : ""}</small>`;
+
+      // overlap count = output for all-ones input and kernel
+      const ccz = C / F, cmax = Math.max(1, ...full.cnt), h = cc.ctx;
+      cc.clear();
+      const cshown = Array.from(run.cnt, (v) => (v === 0 && S.step < total ? NaN : v));        // 0 = a hole, shown once every stamp is in
+      Lab.cells(h, cshown, F, F, 0, 0, C, C, { color: (v) => (v === 0 ? Lab.rgb(Lab.color("--div-mid")) : Lab.sequentialRGB(v / cmax)), fmt, gap: F > 10 ? 1 : 2 });
+      if (p > 0) for (let a = 0; a < F; a++) for (let b = 0; b < F; b++) if (a < p || b < p || a >= F - p || b >= F - p) veil(h, b * ccz, a * ccz, ccz, ccz, 0.7);
+      if (contrib.length && hover.fig === "c") outline(h, hover.b * ccz, hover.a * ccz, ccz, ccz, hl);
+      Lab.$("#cap-c").innerHTML = `stamps per output pixel <small>(= y for all-ones x and w)</small>`;
+      // is the interior uniform? (ignore k - 1 pixels at each border, where fewer stamps can reach)
+      // the interior (pixels every neighbouring stamp can reach) must span at least one period s to show the pattern
+      const inner = []; if (F - 2 * (k - 1) >= s) for (let a = k - 1; a <= F - k; a++) for (let b = k - 1; b <= F - k; b++) inner.push(full.cnt[a * F + b]);
+      const lo = inner.length ? Math.min(...inner) : NaN, hi = inner.length ? Math.max(...inner) : NaN;
+      legend.push(!inner.length ? `<span>input too small to show a full period; the rule: k mod s = ${k % s}, so the overlap is ${k % s ? "uneven" : "even"}</span>`
+        : lo === hi ? `<span>interior: every pixel gets <b>${lo}</b> stamp${lo === 1 ? "" : "s"}: uniform, no checkerboard</span>`
+        : `<span>interior: <b>${[...new Set(inner)].sort((a, b) => a - b).join(", ")}</b> stamps: uneven = checkerboard${lo === 0 ? " (0 = holes no input reaches)" : ""}</span>`);
+      Lab.$("#legend").innerHTML = legend.join("");
+
+      // explanation line
+      if (contrib.length) {
+        const done = contrib.filter((c) => c.idx < S.step);
+        const terms = contrib.map((c) => `${c.idx < S.step ? "" : "("}x[${c.i},${c.j}]·w[${c.u},${c.v}]${c.idx < S.step ? "" : ")"}`).join(" + ");
+        const nums = done.map((c) => `${fmt(x[c.idx])}·${fmtK(w[c.u * k + c.v])}`).join(" + ") || "0";
+        const val = done.reduce((a, c) => a + x[c.idx] * w[c.u * k + c.v], 0);
+        const crop = hover.a < p || hover.b < p || hover.a >= F - p || hover.b >= F - p;
+        Lab.$("#info").innerHTML = `<b>full-grid pixel (${hover.a}, ${hover.b})</b> is painted by <b>${contrib.length}</b> stamp${contrib.length > 1 ? "s" : ""}: <code>${terms}</code>` +
+          ` = <code>${nums}</code> = <b>${fmt(val)}</b>${done.length < contrib.length ? " so far (bracketed stamps not added yet)" : ""}${crop ? "; this pixel is cropped by the padding" : ""}.`;
+      } else if (hover && (hover.a >= F || hover.b >= F)) {
+        Lab.$("#info").textContent = "";
+      } else if (cur >= 0) {
+        Lab.$("#info").innerHTML = `<b>step ${S.step} / ${total}:</b> x[${ci},${cj}] = <b>${fmt(x[cur])}</b> times the whole kernel is <b>added</b> into the output rows ${ci * s}..${ci * s + k - 1}, columns ${cj * s}..${cj * s + k - 1} (stamp origin = (${ci}·${s}, ${cj}·${s})). Hover an output pixel to see every stamp that reaches it.`;
+      } else {
+        Lab.$("#info").innerHTML = `<b>step 0:</b> the output starts as zeros. Press play, or drag the step slider.`;
+      }
+      const uneven = inner.length && lo !== hi;
+      Lab.$("#formula").innerHTML =
+        `out = (n - 1)·s - 2p + k\n` +
+        `    = (${n} - 1)·${s} - 2·${p} + ${k} = <b>${Fo}</b>\n` +
+        `full grid before crop: ${F} x ${F}\n` +
+        `k mod s = ${k} mod ${s} = <b>${k % s}</b>: ` + (k < s ? "holes" : k % s ? "uneven" : "even") +
+        (inner.length ? `\nstamps per pixel: ${lo === hi ? lo : lo + ".." + hi}${uneven ? " (uneven)" : ""}` : "");
+    } else {
+      const R = resizeConv(S.method), M = R.M, ym = seqMax(Array.from(R.y, Math.abs)), um = seqMax(Array.from(R.u, Math.abs));
+      cy.clear();
+      Lab.cells(cy.ctx, R.y, M, M, 0, 0, Y, Y, { color: (v) => Lab.sequentialRGB(0.12 + 0.88 * v / ym), fmt, gap: M > 10 ? 1 : 2 });
+      Lab.$("#cap-y").innerHTML = `output y <small>${M} x ${M} = conv 3x3 of the upsampled map</small>`;
+      cc.clear();
+      Lab.cells(cc.ctx, R.u, M, M, 0, 0, C, C, { color: (v) => Lab.sequentialRGB(0.12 + 0.88 * v / um), fmt, gap: M > 10 ? 1 : 2 });
+      Lab.$("#cap-c").innerHTML = `upsampled x${s} <small>${S.method}, before the conv</small>`;
+      Lab.$("#legend").innerHTML = `<span>every output pixel sums <b>9</b> taps of the upsampled map (fewer only where the zero padding enters): no overlap pattern</span>`;
+      Lab.$("#info").innerHTML = (S.method === "nearest" ? `<b>Nearest upsampling</b> copies every input value onto an ${s} x ${s} block`
+        : `<b>Bilinear upsampling</b> interpolates the input onto a grid ${s} times finer (align_corners=False)`) +
+        `, then an ordinary 3x3 convolution <i>gathers</i> 9 neighbours into each output pixel. Every pixel is computed the same way, so there is nothing periodic to leave a pattern.`;
+      Lab.$("#formula").innerHTML = `upsample: n·s = ${n}·${s} = <b>${M}</b>\nconv 3x3, p = 1:\n    ${M} + 2·1 - 3 + 1 = <b>${M}</b>\ntaps per pixel: <b>9</b> (interior)`;
+    }
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

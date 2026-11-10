@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Receptive field explorer</title>
+<meta name="lab-notebook" content="D1-01">
+<meta name="lab-summary" content="Stack conv / pool / dilated layers, click any unit and see exactly which input pixels it depends on; r and jump per layer with the recursion filled in.">
+<meta name="lab-height" content="860">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .under { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-start; margin-top: 12px; }
+  .under .formula { flex: 1 1 280px; min-width: 0; }
+  table.rf { border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; flex: 0 1 auto; }
+  table.rf th { font-size: 11px; font-weight: 600; color: var(--ink-2); text-align: right; padding: 2px 6px; border-bottom: 1px solid var(--grid); }
+  table.rf td { text-align: right; padding: 2px 6px; color: var(--ink-2); border-bottom: 1px solid var(--grid); }
+  table.rf th:nth-child(2), table.rf td:nth-child(2) { text-align: left; }
+  table.rf tr.layer { cursor: pointer; }
+  table.rf tr.layer:hover td { background: var(--wash); }
+  table.rf tr.sel td { background: var(--wash); color: var(--ink); font-weight: 650; }
+  table.rf td.rv { color: var(--ink); font-weight: 650; }
+  table.rf button { font: inherit; font-size: 13px; line-height: 1; border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 1px 4px; border-radius: 4px; }
+  table.rf button:hover { color: var(--bad); background: var(--wash); }
+  .btn-row .btn { padding: 4px 9px; }
+  button.btn:disabled { opacity: .45; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Receptive field explorer</h1><span class="lab-tag">D1-01 · section 6</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Each unit looks at a small window of the layer below, which looks at a window of the layer below
+    it, and so on. Build a stack, then click any unit (left) or input position (right) to see every input pixel it depends on.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig" style="max-width:422px"><figcaption>cross-section <small>one row of units per layer; click a unit</small></figcaption><div id="fig-x"></div></figure>
+        <figure class="lab-fig" style="width:194px"><figcaption id="cap-in">input</figcaption><div id="fig-in"></div></figure>
+      </div>
+      <div class="under">
+        <table class="rf" id="table" aria-label="receptive field per layer"></table>
+        <div class="formula" id="formula"></div>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div class="ctl"><span class="ctl-label">add a layer on top</span><div class="btn-row" id="add"></div></div>
+      <div class="btn-row" id="edit"></div>
+      <div id="c-preset"></div>
+      <div class="readouts" id="readouts"></div>
+      <p class="note" id="compare"></p>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Stack <b>conv 3x3, maxpool 2, conv 3x3</b> (clear, then add). Is the top unit's receptive field 7, 8 or 9 pixels wide?
+        <details><summary>answer</summary><p>8. The first conv gives 3, the pool adds (2 - 1) * 1 = 1, and after the pool one step in the
+          feature map is 2 input pixels (jump 2), so the last 3x3 adds (3 - 1) * 2 = 4. Layers after a downsampling step grow the
+          receptive field twice as fast: that is why the table's j column matters.</p></details></li>
+      <li>Pick the preset <b>two 3x3</b>, click the top unit, then <b>one 5x5</b>. Same receptive field? How many weights, and how many non-linearities?
+        <details><summary>why</summary><p>Both see 5 x 5 pixels. Two 3x3 layers use 2 * 9 = 18 weights per channel pair and have a ReLU in
+          between; the 5x5 uses 25 and has one. Three 3x3 = one 7x7 with 27 instead of 49 weights. This is VGG's argument for using
+          only 3x3 kernels.</p></details></li>
+      <li>Look at the shading on the input grid. Are all pixels inside the receptive field equally important to the unit?
+        <details><summary>why</summary><p>No. The darker the cell, the more paths lead from that pixel to the unit (for all-ones weights it is
+          exactly the gradient of the unit with respect to the pixel). Centre pixels are reached by many paths, border pixels by one,
+          so the <i>effective</i> receptive field is a blob much smaller than the r x r square (Luo et al., 2016).</p></details></li>
+      <li>Pick the preset <b>three dilated</b>. r = 13 with only 27 weights. Which input pixels does the top unit actually read?
+        <details><summary>why</summary><p>Only every second pixel in each direction (49 of 169): with dilation 2 at every layer, the taps never
+          land on odd offsets. This "gridding" is why dilated stacks start with an ordinary conv or mix rates. Click
+          <b>+ conv 3x3</b> on top of a fresh stack first and add the dilated layers after it: the holes disappear.</p></details></li>
+      <li>Click a unit at the very edge of the top layer. What are the dashed cells?
+        <details><summary>why</summary><p>Zero padding: part of that unit's receptive field lies outside the image, so it sees fewer real pixels
+          and a lot of zeros. Border units behave differently from centre units, one reason for the bright frame you saw in the
+          learned feature maps in section 8.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+// ---- maths (pure; checked against cvcourse.convops.receptive_field and torch autograd)
+const RF = (() => {
+  const TYPES = {
+    c3: { label: "conv 3x3", k: 3, s: 1, p: 1, d: 1, conv: true },
+    c5: { label: "conv 5x5", k: 5, s: 1, p: 2, d: 1, conv: true },
+    c3s2: { label: "conv 3x3 /2", k: 3, s: 2, p: 1, d: 1, conv: true },
+    pool: { label: "maxpool 2", k: 2, s: 2, p: 0, d: 1, conv: false },
+    dil2: { label: "dilated 3x3", k: 3, s: 1, p: 2, d: 2, conv: true },
+  };
+  /** rows[0] = input, rows[l] = after layer l: r (receptive field), j (jump), start (centre of unit 0, input pixel i spans [i, i+1]), n (size). */
+  function table(codes, n0) {
+    let r = 1, j = 1, start = 0.5, n = n0;
+    const rows = [{ code: "input", label: "input", r, j, start, n, w: 0, wsum: 0 }];
+    let wsum = 0;
+    for (const code of codes) {
+      const L = TYPES[code];
+      const keff = L.d * (L.k - 1) + 1, rPrev = r, jPrev = j, nPrev = n;
+      r = r + (keff - 1) * j;
+      start = start + ((keff - 1) / 2 - L.p) * j;
+      j = j * L.s;
+      n = Math.floor((n + 2 * L.p - keff) / L.s) + 1;
+      const w = L.conv ? L.k * L.k : 0;
+      wsum += w;
+      rows.push({ code, ...L, keff, r, j, start, n, rPrev, jPrev, nPrev, w, wsum });
+    }
+    return rows;
+  }
+  /** Path counts along one axis: deps[m] = Map(index in layer m -> number of paths to unit idx of layer l).
+   *  Indices outside [0, n) are zero padding: they are drawn but do not depend on anything below. */
+  function deps(rows, l, idx) {
+    const out = [];
+    out[l] = new Map([[idx, 1]]);
+    for (let m = l; m >= 1; m--) {
+      const L = rows[m], below = new Map();
+      for (const [q, c] of out[m]) {
+        if (q < 0 || q >= L.n) continue;
+        for (let u = 0; u < L.k; u++) { const t = q * L.s - L.p + u * L.d; below.set(t, (below.get(t) || 0) + c); }
+      }
+      out[m - 1] = below;
+    }
+    return out;
+  }
+  return { TYPES, table, deps };
+})();
+// ---- end maths
+
+(async () => {
+  const N = 32, MAXL = 8;
+  const S = Lab.params({ stack: "c3,c3,pool,c3,c3", layer: -1, row: -1, col: -1 });
+  let codes = S.stack.split(",").map((s) => s.trim()).filter((s) => RF.TYPES[s]);
+  let rows = RF.table(codes, N);
+  const PRESETS = {
+    "VGG start: 3x3, 3x3, pool, 3x3, 3x3": "c3,c3,pool,c3,c3",
+    "two 3x3": "c3,c3",
+    "one 5x5": "c5",
+    "three 3x3 (= one 7x7)": "c3,c3,c3",
+    "downsample early: 3x3/2, 3x3/2, 3x3": "c3s2,c3s2,c3",
+    "three dilated (d=2)": "dil2,dil2,dil2",
+    "VGG, two blocks + pools": "c3,c3,pool,c3,c3,pool",
+  };
+
+  // input picture: the sample photo averaged 4 x 4 -> 32 x 32
+  const photo = await Lab.photo();
+  const img = new Float32Array(N * N), f = photo.w / N;
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    let s = 0;
+    for (let a = 0; a < f; a++) for (let b = 0; b < f; b++) s += photo.gray[(i * f + a) * photo.w + j * f + b];
+    img[i * N + j] = s / (f * f);
+  }
+
+  // ---- figures
+  const XW = 420, XH = 290, LW = 84, M = 3;            // cross-section: label column, margin cells for padding
+  const cell = (XW - LW - 6) / (N + 2 * M);
+  const X = (c) => LW + (c + M) * cell, invX = (px) => (px - LW) / cell - M;
+  const cx = Lab.canvas("#fig-x", XW, XH, { framed: true });
+  const PX = 6;
+  const cin = Lab.canvas("#fig-in", N * PX, N * PX, { framed: true });
+
+  function geometry() {
+    const L = rows.length - 1, bottom = 34, top = 8;
+    const rowH = Math.min(46, (XH - top - bottom) / (L + 1));
+    const yOf = (m) => XH - bottom - (m + 0.5) * rowH;
+    return { L, rowH, yOf, boxH: Math.max(6, Math.min(16, rowH - 9)) };
+  }
+  function clampSel() {
+    const L = rows.length - 1;
+    if (S.layer < 1 || S.layer > L) S.layer = L;
+    if (L === 0) return;
+    const n = rows[S.layer].n;
+    if (S.row < 0 || S.row >= n) S.row = Math.floor((n - 1) / 2);
+    if (S.col < 0 || S.col >= n) S.col = Math.floor((n - 1) / 2);
+  }
+  /** Select layer m and keep the unit over the same input position. */
+  function selectLayer(m, col) {
+    const a = rows[S.layer], b = rows[m];
+    const keep = (q) => Lab.clamp(Math.round((a.start + q * a.j - b.start) / b.j), 0, b.n - 1);
+    S.row = S.layer >= 1 ? keep(S.row) : Math.floor((b.n - 1) / 2);
+    S.col = col != null ? col : S.layer >= 1 ? keep(S.col) : Math.floor((b.n - 1) / 2);
+    S.layer = m;
+  }
+
+  Lab.pointer(cx, {
+    down(p) {
+      const { L, rowH, yOf } = geometry();
+      for (let m = 1; m <= L; m++) {
+        if (Math.abs(p.y - yOf(m)) <= rowH / 2) {
+          const R = rows[m];
+          selectLayer(m, Lab.clamp(Math.round((invX(p.x) - R.start) / R.j), 0, R.n - 1));
+          redraw(); return;
+        }
+      }
+    },
+    move(p) { this.down(p); },
+    hover(p) {
+      const { L, rowH, yOf } = geometry(); let h = null;
+      for (let m = 1; m <= L; m++) if (Math.abs(p.y - yOf(m)) <= rowH / 2) h = { m, q: Lab.clamp(Math.round((invX(p.x) - rows[m].start) / rows[m].j), 0, rows[m].n - 1) };
+      if (JSON.stringify(h) !== JSON.stringify(hover)) { hover = h; redraw(); }
+    },
+    leave() { hover = null; redraw(); },
+  });
+  let hover = null;
+  const pickIn = (p) => {
+    if (rows.length < 2) return;
+    const R = rows[S.layer];
+    S.col = Lab.clamp(Math.round((p.x / PX - R.start) / R.j), 0, R.n - 1);
+    S.row = Lab.clamp(Math.round((p.y / PX - R.start) / R.j), 0, R.n - 1);
+    redraw();
+  };
+  Lab.pointer(cin, { down: pickIn, move: pickIn });
+
+  // ---- controls
+  const addBtns = {};
+  for (const [code, L] of Object.entries(RF.TYPES)) {
+    addBtns[code] = Lab.button("#add", "+ " + (code === "dil2" ? "dilated 3x3 (d=2)" : L.label), () => {
+      codes.push(code); rows = RF.table(codes, N); S.layer = rows.length - 1; S.row = S.col = -1; preset.set(""); redraw();
+    });
+  }
+  Lab.button("#edit", "remove top layer", () => { codes.pop(); rows = RF.table(codes, N); S.layer = Math.min(S.layer, rows.length - 1); preset.set(""); redraw(); });
+  Lab.button("#edit", "clear", () => { codes = []; rows = RF.table(codes, N); S.layer = 0; preset.set(""); redraw(); });
+  const preset = Lab.select("#c-preset", {
+    label: "preset", options: [{ value: "", label: "(your own stack)" }, ...Object.keys(PRESETS)],
+    value: Object.keys(PRESETS).find((k) => PRESETS[k] === codes.join(",")) || "",
+    onChange: (v) => { if (PRESETS[v]) { codes = PRESETS[v].split(","); rows = RF.table(codes, N); S.layer = rows.length - 1; S.row = S.col = -1; redraw(); } },
+  });
+  const rR = Lab.readout("#readouts", "receptive field r");
+  const rJ = Lab.readout("#readouts", "jump j");
+  const rW = Lab.readout("#readouts", "weights so far");
+  const rW1 = Lab.readout("#readouts", "one r x r conv");
+  Lab.$("#table").addEventListener("click", (e) => {
+    const del = e.target.closest("button[data-del]");
+    if (del) { codes.splice(Number(del.dataset.del) - 1, 1); rows = RF.table(codes, N); S.layer = Math.min(S.layer, rows.length - 1); S.row = S.col = -1; preset.set(""); redraw(); return; }
+    const tr = e.target.closest("tr[data-m]");
+    if (tr) { selectLayer(Number(tr.dataset.m)); redraw(); }
+  });
+
+  // ---- drawing
+  function draw() {
+    const g = cx.ctx; cx.clear();
+    const L = rows.length - 1;
+    clampSel();
+    const c1 = Lab.color("--c1"), hl = Lab.color("--hl"), ink = Lab.color("--ink"), muted = Lab.color("--muted");
+    for (const [code, b] of Object.entries(addBtns)) {
+      const T = RF.TYPES[code], n = rows[L].n;
+      const ok = L < MAXL && Math.floor((n + 2 * T.p - (T.d * (T.k - 1) + 1)) / T.s) + 1 >= 1;
+      b.disabled = !ok; b.title = ok ? "" : L >= MAXL ? `at most ${MAXL} layers` : "the feature map is already too small";
+    }
+    const { rowH, yOf, boxH } = geometry();
+    const D = L ? RF.deps(rows, S.layer, S.col) : null;
+    const Drow = L ? RF.deps(rows, S.layer, S.row) : null;
+
+    // labels + all units
+    g.save(); g.beginPath(); g.rect(LW - 2, 0, XW - LW + 2, XH); g.clip();
+    for (let m = 0; m <= L; m++) {
+      const R = rows[m], y = yOf(m), w = Math.max(2, R.j * cell - 1.5);
+      g.fillStyle = Lab.color("--wash");
+      for (let q = 0; q < R.n; q++) { const c = R.start + q * R.j; g.fillRect(X(c) - w / 2, y - boxH / 2, w, boxH); }
+    }
+    if (L) {
+      // the cone: extent of the dependencies, layer by layer
+      g.beginPath();
+      const ext = [];
+      for (let m = 0; m <= S.layer; m++) {
+        const R = rows[m], qs = [...D[m].keys()], w = Math.max(2, R.j * cell - 1.5);
+        ext.push([X(R.start + Math.min(...qs) * R.j) - w / 2, X(R.start + Math.max(...qs) * R.j) + w / 2, yOf(m)]);
+      }
+      ext.forEach(([a, , y], i) => (i ? g.lineTo(a, y) : g.moveTo(a, y)));
+      for (let i = ext.length - 1; i >= 0; i--) g.lineTo(ext[i][1], ext[i][2]);
+      g.closePath(); g.fillStyle = Lab.alpha("--c1", 0.08); g.fill();
+      // dependency units, shaded by number of paths; padding positions dashed
+      for (let m = 0; m < S.layer; m++) {
+        const R = rows[m], y = yOf(m), w = Math.max(2, R.j * cell - 1.5);
+        const mx = Math.max(...D[m].values());
+        for (const [q, cnt] of D[m]) {
+          const c = R.start + q * R.j;
+          if (q < 0 || q >= R.n) {
+            g.save(); g.setLineDash([2, 2]); g.strokeStyle = muted; g.lineWidth = 1;
+            g.strokeRect(X(c) - w / 2 + 0.5, y - boxH / 2 + 0.5, w - 1, boxH - 1); g.restore();
+          } else {
+            g.fillStyle = Lab.alpha("--c1", 0.25 + 0.75 * cnt / mx); g.fillRect(X(c) - w / 2, y - boxH / 2, w, boxH);
+          }
+        }
+      }
+      // direct taps of the selected unit
+      const R = rows[S.layer], B = rows[S.layer - 1], cSel = R.start + S.col * R.j, ySel = yOf(S.layer);
+      g.strokeStyle = hl; g.lineWidth = 1.25;
+      for (let u = 0; u < R.k; u++) {
+        const t = S.col * R.s - R.p + u * R.d;
+        g.beginPath(); g.moveTo(X(cSel), ySel + boxH / 2); g.lineTo(X(B.start + t * B.j), yOf(S.layer - 1) - boxH / 2); g.stroke();
+      }
+      const w = Math.max(2, R.j * cell - 1.5);
+      g.fillStyle = hl; g.fillRect(X(cSel) - w / 2, ySel - boxH / 2, w, boxH);
+      if (hover && !(hover.m === S.layer && hover.q === S.col)) {
+        const H = rows[hover.m], wh = Math.max(2, H.j * cell - 1.5);
+        g.strokeStyle = ink; g.lineWidth = 1.5; g.strokeRect(X(H.start + hover.q * H.j) - wh / 2, yOf(hover.m) - boxH / 2, wh, boxH);
+      }
+      // bracket under the input row: the theoretical receptive field r
+      const y0 = yOf(0) + boxH / 2 + 6, a = X(cSel - R.r / 2), b = X(cSel + R.r / 2);
+      g.strokeStyle = ink; g.lineWidth = 1.25;
+      g.beginPath(); g.moveTo(a, y0 - 3); g.lineTo(a, y0); g.lineTo(b, y0); g.lineTo(b, y0 - 3); g.stroke();
+      Lab.text(g, `r = ${R.r}`, Lab.clamp((a + b) / 2, LW + 24, XW - 24), y0 + 14, { align: "center", size: 12, weight: 650, color: ink });
+    }
+    g.restore();
+    // input edges
+    g.save(); g.strokeStyle = Lab.color("--axis"); g.setLineDash([3, 3]); g.lineWidth = 1;
+    for (const c of [0, N]) { g.beginPath(); g.moveTo(Math.round(X(c)) + 0.5, 4); g.lineTo(Math.round(X(c)) + 0.5, yOf(0) + boxH / 2 + 2); g.stroke(); }
+    g.restore();
+    for (let m = 0; m <= L; m++) {
+      const sel = m === S.layer && L;
+      Lab.text(g, m ? `${m}  ${rows[m].label}` : "input", 4, yOf(m), { baseline: "middle", size: 11.5, weight: sel ? 700 : 400, color: sel ? ink : Lab.color("--ink-2") });
+    }
+
+    // ---- input grid (2-D): footprint = row paths x column paths
+    const h = cin.ctx; cin.clear();
+    const surf = Lab.rgb(Lab.color("--surface"));
+    Lab.image(h, img, N, N, 0, 0, N * PX, N * PX, (v) => Lab.grayRGB(v).map((c, i) => Math.round(surf[i] + (c - surf[i]) * 0.5)));
+    if (L) {
+      const cr = D[0], rr = Drow[0];
+      let mx = 0;
+      for (const [i, a] of rr) for (const [j, b] of cr) if (i >= 0 && j >= 0 && i < N && j < N) mx = Math.max(mx, a * b);
+      for (const [i, a] of rr) for (const [j, b] of cr) {
+        if (i < 0 || j < 0 || i >= N || j >= N) continue;
+        h.fillStyle = Lab.alpha("--c1", 0.22 + 0.68 * (a * b) / mx); h.fillRect(j * PX, i * PX, PX, PX);
+      }
+      const R = rows[S.layer], ccx = R.start + S.col * R.j, ccy = R.start + S.row * R.j;
+      h.strokeStyle = hl; h.lineWidth = 2;
+      h.strokeRect((ccx - R.r / 2) * PX, (ccy - R.r / 2) * PX, R.r * PX, R.r * PX);
+      h.fillStyle = hl; h.beginPath(); h.arc(ccx * PX, ccy * PX, 3.5, 0, 2 * Math.PI); h.fill();
+      let used = 0; for (const [i] of rr) for (const [j] of cr) if (i >= 0 && j >= 0 && i < N && j < N) used++;
+      Lab.$("#cap-in").innerHTML = `input <small>${N} x ${N}; unit (${S.row}, ${S.col}) of layer ${S.layer} reads ${used} of these pixels</small>`;
+    } else Lab.$("#cap-in").innerHTML = `input <small>${N} x ${N}; add a layer</small>`;
+
+    // ---- table
+    let t = "<tr><th>#</th><th>layer</th><th>k</th><th>s</th><th>p</th><th>d</th><th>size</th><th>r</th><th>j</th><th>weights</th><th></th></tr>";
+    rows.forEach((R, m) => {
+      t += m ? `<tr class="layer${m === S.layer ? " sel" : ""}" data-m="${m}"><td>${m}</td><td>${R.label}</td><td>${R.k}</td><td>${R.s}</td><td>${R.p}</td><td>${R.d}</td>` +
+          `<td>${R.n}</td><td class="rv">${R.r}</td><td class="rv">${R.j}</td><td>${R.w}</td><td><button type="button" data-del="${m}" title="remove this layer" aria-label="remove layer ${m}">×</button></td></tr>`
+        : `<tr><td>0</td><td>input</td><td></td><td></td><td></td><td></td><td>${R.n}</td><td class="rv">1</td><td class="rv">1</td><td></td><td></td></tr>`;
+    });
+    Lab.$("#table").innerHTML = t;
+
+    // ---- formula, readouts, comparison
+    const l = S.layer;
+    if (L && l >= 1) {
+      const R = rows[l];
+      Lab.$("#formula").innerHTML =
+        `layer ${l}: ${R.label}   k=${R.k}  s=${R.s}  p=${R.p}  d=${R.d}\n` +
+        (R.d > 1 ? `k_eff = d(k-1)+1 = ${R.d}*(${R.k}-1)+1 = <b>${R.keff}</b>\n` : "") +
+        `r_${l} = r_${l - 1} + (${R.d > 1 ? "k_eff" : "k"}_${l} - 1)*j_${l - 1}\n    = ${R.rPrev} + (${R.keff} - 1)*${R.jPrev} = <b>${R.r}</b>\n` +
+        `j_${l} = j_${l - 1}*s_${l} = ${R.jPrev}*${R.s} = <b>${R.j}</b>\n` +
+        `n_${l} = floor((n_${l - 1} + 2p - k_eff)/s) + 1\n    = floor((${R.nPrev} + ${2 * R.p} - ${R.keff})/${R.s}) + 1 = <b>${R.n}</b>`;
+      rR.set(`${R.r} px`); rJ.set(`${R.j} px`); rW.set(String(R.wsum)); rW1.set(String(R.r * R.r));
+      const span = l === 1 ? "Layer 1 sees" : `Layers 1-${l} see`;
+      Lab.$("#compare").innerHTML = R.wsum
+        ? `${span} ${R.r} x ${R.r} input pixels with <b>${R.wsum}</b> weights per channel pair; one ${R.r} x ${R.r} conv would need <b>${R.r * R.r}</b>` +
+          ` (${R.r * R.r >= R.wsum ? (R.r * R.r / R.wsum).toFixed(1) + "x more" : (R.wsum / (R.r * R.r)).toFixed(1) + "x fewer"}) and has a single non-linearity. Two 3x3 = one 5x5: 18 vs 25.`
+        : `${span} ${R.r} x ${R.r} input pixels with 0 weights: pooling grows the receptive field for free, but throws resolution away.`;
+    } else {
+      Lab.$("#formula").textContent = "r_0 = 1, j_0 = 1 (one input pixel)\nadd a layer to start the recursion";
+      rR.set("1 px"); rJ.set("1 px"); rW.set("0"); rW1.set("1");
+      Lab.$("#compare").textContent = "";
+    }
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${hl}"></i>selected unit</span>` +
+      `<span><i style="background:${c1}"></i>units / pixels it depends on (darker = more paths)</span>` +
+      `<span><i style="border:1px dashed ${muted};background:transparent"></i>zero padding</span>` +
+      `<span><i style="border:2px solid ${hl};background:transparent"></i>r x r receptive field</span>`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

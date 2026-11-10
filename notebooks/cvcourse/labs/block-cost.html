@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What does a block cost?</title>
+<meta name="lab-notebook" content="D1-03">
+<meta name="lab-summary" content="Same input, four blocks: standard conv, ResNet bottleneck, depthwise-separable, Inception-style 1x1 then kxk. Parameters and multiply-adds with the formulas filled in.">
+<meta name="lab-height" content="960">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .under { margin-top: 10px; }
+  #formula { font-size: 11.5px; }
+  .readouts .readout { flex: 1 1 110px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>What does a block cost?</h1><span class="lab-tag">D1-03 · sections 3-5</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Four ways to turn C_in x H x W into C_out x H x W (stride 1, same padding). Each box is a conv layer
+    with its weight count; the bars add them up. Which numbers move when you change the widths, k or H?</p>
+
+  <div class="lab-stage">
+    <div>
+      <p class="lab-cap">the four blocks <small>chips = tensor shapes (C x H x W), boxes = conv layers</small></p>
+      <div id="fig-blocks"></div>
+      <p class="lab-cap under" id="cap-bars">cost</p>
+      <div id="fig-bars"></div>
+      <div class="legend under" id="legend"></div>
+      <div class="formula under" id="formula"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-shape" class="lab-controls"></div>
+      <div class="readouts" id="readouts"></div>
+      <p class="note" id="note"></p>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>C_in = C_out = 512: switch k from 3 to 7. How much do the standard and the depthwise-sep. blocks grow?
+        <details><summary>why</summary><p>The standard conv has k²·C_in·C_out weights, so it grows by 49/9 = 5.4x. The
+          depthwise-separable block is k²·C_in + C_in·C_out: only the small depthwise part grows, the 1x1 (C_in·C_out) is
+          unchanged, so it grows by about 1.1x. Large kernels are almost free in a depthwise conv - that is why ConvNeXt uses 7x7 depthwise.</p></details></li>
+      <li>Slide C_in = C_out from 32 to 1024 (k = 3). Does the "depthwise-sep. saves" factor keep growing?
+        <details><summary>why</summary><p>The ratio is 1 / (1/C_out + 1/k²): 7x at 32 channels, 8.7x at 256, and it
+          approaches k² = 9 but never passes it. At large widths almost all of the remaining cost is the 1x1 pointwise conv (the orange segment).</p></details></li>
+      <li>Switch the bars to <b>log</b>, then double H = W. Which bars move, and by how much?
+        <details><summary>why</summary><p>Parameters do not move at all: a conv's weights do not depend on the image size.
+          Every MACs bar moves right by the same factor 4: each weight is used once per output pixel, so MACs = weights x H x W.
+          Halving the resolution (stride 2, pooling) is the cheapest way to cut compute.</p></details></li>
+      <li>Keep C_in = 256 and set C_out = 512. What appears in the bottleneck, and how big is it?
+        <details><summary>why</summary><p>When the shape changes, the shortcut cannot be the identity: it becomes a 1x1 projection
+          with C_in·C_out = 131 072 weights - more than the three convs of the block together (86 016). ResNets therefore project only
+          in the first block of each stage; all the others keep the identity shortcut for free.</p></details></li>
+      <li>At 256 channels depthwise-separable needs 8.7x fewer MACs. Is it 8.7x faster on a GPU?
+        <details><summary>answer</summary><p>Usually not. A depthwise conv does very little arithmetic per byte it reads, so it is limited
+          by memory bandwidth, not by multiply-adds; MobileNet / EfficientNet are much less fast on a GPU than their MAC count suggests.
+          MACs estimate compute; only timing on the target hardware measures latency (notebook section 6, D2-04).</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const CS = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024];
+  const HWS = [7, 14, 28, 56, 112, 224];
+  const S = Lab.params({ cin: 256, cout: 256, hw: 28, k: 3, r: 4, bn: false, scale: "linear" });
+  const nearest = (list, v) => list.reduce((b, x) => (Math.abs(x - v) < Math.abs(b - v) ? x : b), list[0]);
+  S.cin = nearest(CS, S.cin); S.cout = nearest(CS, S.cout); S.hw = nearest(HWS, S.hw);
+  S.k = nearest([3, 5, 7], S.k); S.r = nearest([1, 2, 4, 8, 16], S.r);
+  if (S.scale !== "log") S.scale = "linear";
+
+  const KIND = {
+    full: { label: "k x k conv (space + channels)", color: "--c1" },
+    pw: { label: "1x1 conv (channels only)", color: "--c2" },
+    dw: { label: "k x k depthwise (space only)", color: "--c4" },
+    proj: { label: "1x1 projection shortcut", color: "--c5" },
+    bn: { label: "BatchNorm (2 per channel)", color: "--muted" },
+  };
+  const int = (n) => Math.round(n).toLocaleString("en-US");
+  const compact = (n) => {
+    const a = Math.abs(n);
+    const f = (v, u) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + " " + u;
+    if (a >= 1e12) return f(n / 1e12, "T");
+    if (a >= 1e9) return f(n / 1e9, "G");
+    if (a >= 1e6) return f(n / 1e6, "M");
+    if (a >= 1e4) return f(n / 1e3, "k");
+    return int(n);
+  };
+  const ratioTxt = (x) => (x >= 10 ? x.toFixed(0) : x >= 2 ? x.toFixed(1) : x.toFixed(2));
+
+  // ---- the maths: one conv layer, then the four blocks (stride 1, same padding, no conv bias)
+  function conv(kind, cin, cout, k, groups = 1) {
+    const w = (cin / groups) * cout * k * k;                  // D1-01: C_out * C_in/groups * k * k
+    return { kind, cin, cout, k, groups, w, bn: S.bn ? 2 * cout : 0 };
+  }
+  function blocks() {
+    const { cin, cout, k } = S, mid = Math.max(1, Math.round(cin / S.r)), hw = S.hw * S.hw;
+    const list = [
+      { id: "std", title: "standard conv", sub: "VGG, ResNet basic block", layers: [conv("full", cin, cout, k)],
+        note: ["space and channels are", "mixed in one step:", "every output channel", "sees k x k x C_in inputs"] },
+      { id: "bott", title: "ResNet bottleneck", sub: "ResNet-50 and deeper", residual: true,
+        layers: [conv("pw", cin, mid, 1), conv("full", mid, mid, k), conv("pw", mid, cout, 1)],
+        shortcut: cin !== cout ? conv("proj", cin, cout, 1) : null, note: [] },
+      { id: "dw", title: "depthwise-separable", sub: "MobileNet, EfficientNet", layers: [conv("dw", cin, cin, k, cin), conv("pw", cin, cout, 1)],
+        note: ["first space (one k x k", "filter per channel),", "then channels (1x1)"] },
+      { id: "inc", title: "1x1 then k x k", sub: "one Inception branch", layers: [conv("pw", cin, mid, 1), conv("full", mid, cout, k)],
+        note: ["squeeze the channels,", "then do the expensive", "k x k on fewer of them"] },
+    ];
+    for (const b of list) {
+      b.all = b.layers.concat(b.shortcut ? [b.shortcut] : []);
+      b.w = b.all.reduce((s, l) => s + l.w, 0);
+      b.bn = b.all.reduce((s, l) => s + l.bn, 0);
+      b.params = b.w + b.bn;
+      b.macs = b.w * hw;                                       // MACs = weights x H_out x W_out (BN: no MACs)
+    }
+    return { list, mid, hw };
+  }
+
+  // ---- canvases and controls
+  const cb = Lab.canvas("#fig-blocks", 700, 266);
+  const cbar = Lab.canvas("#fig-bars", 700, 152);
+  const csel = (label, list, key) => Lab.slider("#c-shape", {
+    label, min: 0, max: list.length - 1, step: 1, value: list.indexOf(S[key]), fmt: (i) => String(list[i]),
+    onInput: (i) => { S[key] = list[i]; redraw(); },
+  });
+  csel("C_in (input channels)", CS, "cin");
+  csel("C_out (output channels)", CS, "cout");
+  Lab.slider("#c-shape", { label: "H = W (resolution)", min: 0, max: HWS.length - 1, step: 1, value: HWS.indexOf(S.hw),
+    fmt: (i) => `${HWS[i]} x ${HWS[i]}`, onInput: (i) => { S.hw = HWS[i]; redraw(); } });
+  Lab.segmented("#c-shape", { label: "kernel k", options: [3, 5, 7], value: S.k, onChange: (v) => { S.k = v; redraw(); } });
+  Lab.segmented("#c-shape", { label: "reduction r (C_mid = C_in / r)", options: [1, 2, 4, 8, 16], value: S.r, onChange: (v) => { S.r = v; redraw(); } });
+  Lab.toggle("#c-shape", { label: "count BatchNorm after every conv", value: S.bn, onChange: (v) => { S.bn = v; redraw(); } });
+  Lab.segmented("#c-shape", { label: "bar length", options: [{ value: "linear", label: "linear" }, { value: "log", label: "log (fixed axis)" }],
+    value: S.scale, onChange: (v) => { S.scale = v; redraw(); } });
+  const rDw = Lab.readout("#readouts", "depthwise-sep. saves");
+  const rBott = Lab.readout("#readouts", "bottleneck saves");
+  const rInc = Lab.readout("#readouts", "1x1 then k x k saves");
+  const rUse = Lab.readout("#readouts", "uses of each weight");
+
+  // ---- drawing helpers
+  const ink = () => Lab.color("--ink"), ink2 = () => Lab.color("--ink-2"), muted = () => Lab.color("--muted");
+  function chip(g, cx, y, text) {
+    g.save(); g.font = "10.5px ui-monospace, Consolas, monospace";
+    const w = g.measureText(text).width + 12;
+    g.fillStyle = Lab.color("--wash"); g.beginPath(); g.roundRect(cx - w / 2, y, w, 16, 8); g.fill(); g.restore();
+    Lab.text(g, text, cx, y + 8.5, { size: 10.5, mono: true, align: "center", baseline: "middle", color: ink2() });
+  }
+  function arrow(g, cx, y0, y1, color) {
+    g.save(); g.strokeStyle = color || Lab.color("--axis"); g.fillStyle = g.strokeStyle; g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(cx, y0); g.lineTo(cx, y1 - 4); g.stroke();
+    g.beginPath(); g.moveTo(cx - 4, y1 - 5); g.lineTo(cx + 4, y1 - 5); g.lineTo(cx, y1); g.closePath(); g.fill(); g.restore();
+  }
+  function layerName(l) {
+    if (l.kind === "dw") return `${l.k}x${l.k} depthwise, ${l.cin} ch`;
+    if (l.kind === "full") return `${l.k}x${l.k} conv ${l.cin} -> ${l.cout}`;
+    return `1x1 conv ${l.cin} -> ${l.cout}`;
+  }
+  function layerBox(g, cx, y, l) {
+    const w = 150, h = 30, col = KIND[l.kind].color;
+    g.save(); g.fillStyle = Lab.alpha(col, 0.16); g.strokeStyle = Lab.color(col); g.lineWidth = 1.5;
+    g.beginPath(); g.roundRect(cx - w / 2, y, w, h, 6); g.fill(); g.stroke(); g.restore();
+    Lab.text(g, layerName(l), cx, y + 12.5, { size: 11, weight: 600, align: "center", color: ink() });
+    Lab.text(g, `${int(l.w)} weights`, cx, y + 25, { size: 10.5, align: "center", color: ink2() });
+  }
+
+  function drawBlocks(B) {
+    const g = cb.ctx; cb.clear();
+    const colW = 175, H = S.hw;
+    B.list.forEach((b, i) => {
+      const x0 = i * colW, cx = x0 + 80;
+      Lab.text(g, b.title, x0 + 7, 13, { size: 12.5, weight: 650, color: ink() });
+      Lab.text(g, b.sub, x0 + 7, 27, { size: 10.5, color: muted() });
+      let y = 34;
+      const top = y;
+      chip(g, cx, y, `${S.cin}x${H}x${H}`); y += 16;
+      b.layers.forEach((l, j) => {
+        arrow(g, cx, y + 1, y + 8); y += 8;
+        layerBox(g, cx, y, l); y += 30;
+        const last = j === b.layers.length - 1;
+        if (last && b.residual) {
+          arrow(g, cx, y + 1, y + 8); y += 8;
+          g.save(); g.strokeStyle = ink2(); g.lineWidth = 1.5; g.beginPath(); g.arc(cx, y + 8, 8, 0, 2 * Math.PI); g.stroke(); g.restore();
+          Lab.text(g, "+", cx, y + 8.5, { size: 13, weight: 650, align: "center", baseline: "middle", color: ink() });
+          // shortcut path: from the input chip, down the right side, into the +
+          const xs = x0 + 169, yIn = top + 8, yPlus = y + 8, proj = !!b.shortcut;
+          g.save(); g.strokeStyle = proj ? Lab.color("--c5") : muted(); g.lineWidth = proj ? 2.5 : 1.5;
+          g.beginPath(); g.moveTo(cx + 48, yIn); g.lineTo(xs, yIn); g.lineTo(xs, yPlus); g.lineTo(cx + 9, yPlus); g.stroke(); g.restore();
+          g.save(); g.translate(xs - 7, (yIn + yPlus) / 2); g.rotate(-Math.PI / 2);
+          Lab.text(g, proj ? `1x1 projection: ${int(b.shortcut.w)} weights` : "identity shortcut: 0 weights", 0, 0,
+            { size: 10, align: "center", baseline: "middle", color: proj ? ink() : muted() });
+          g.restore();
+          y += 16;
+        }
+        arrow(g, cx, y + 1, y + 8); y += 8;
+        const c = last ? S.cout : l.cout;
+        chip(g, cx, y, `${c}x${H}x${H}`); y += 16;
+      });
+      b.note.forEach((t, j) => Lab.text(g, t, x0 + 7, y + 22 + 14 * j, { size: 10.5, color: muted() }));
+    });
+  }
+
+  const LOG = { params: [1, 8], macs: [4, 13] };          // fixed log10 axes: 10 .. 100 M weights, 10 k .. 10 T MACs
+  const tickTxt = (e) => ["1", "10", "100", "1k", "10k", "100k", "1M", "10M", "100M", "1G", "10G", "100G", "1T", "10T"][e];
+  function drawBars(B) {
+    const g = cbar.ctx; cbar.clear();
+    const L = 172, rowH = 28, y0 = 26;
+    const panels = [{ key: "params", x: 116, title: S.bn ? "parameters (weights + BN)" : "parameters (weights)" },
+                    { key: "macs", x: 412, title: "multiply-adds per image (MACs)" }];
+    const std = B.list[0];
+    B.list.forEach((b, i) => Lab.text(g, b.title, 0, y0 + i * rowH + 12, { size: 11.5, color: ink2() }));
+    for (const P of panels) {
+      Lab.text(g, P.title, P.x, 12, { size: 11.5, weight: 600, color: ink() });
+      const maxV = Math.max(...B.list.map((b) => b[P.key]));
+      const [lo, hi] = LOG[P.key];
+      const len = (v) => (S.scale === "log" ? L * Lab.clamp((Math.log10(Math.max(v, 1)) - lo) / (hi - lo), 0, 1) : (L * v) / maxV);
+      if (S.scale === "log") {
+        g.save(); g.strokeStyle = Lab.color("--grid"); g.lineWidth = 1;
+        for (let e = lo; e <= hi; e++) {
+          const x = P.x + (L * (e - lo)) / (hi - lo);
+          g.beginPath(); g.moveTo(Math.round(x) + 0.5, y0 - 4); g.lineTo(Math.round(x) + 0.5, y0 + 4 * rowH - 6); g.stroke();
+          if ((e - lo) % (P.key === "macs" ? 3 : 2) === 0) Lab.text(g, tickTxt(e), x, y0 + 4 * rowH + 6, { size: 10, align: "center", color: muted() });
+        }
+        g.restore();
+      }
+      B.list.forEach((b, i) => {
+        const y = y0 + i * rowH, total = b[P.key], bl = len(total);
+        // stacked by layer: segment widths are the linear shares of the block's total
+        const parts = b.all.map((l) => ({ kind: l.kind, v: P.key === "macs" ? l.w * B.hw : l.w }));
+        if (P.key === "params" && S.bn) parts.push({ kind: "bn", v: b.bn });
+        let x = P.x;
+        for (const p of parts) {
+          const w = total > 0 ? (bl * p.v) / total : 0;
+          g.fillStyle = Lab.color(KIND[p.kind].color); g.fillRect(x, y + 2, Math.max(0, w - 0.5), 16); x += w;
+        }
+        const r = std[P.key] / total;
+        Lab.text(g, compact(total), P.x + bl + 6, y + 14, { size: 11.5, weight: 650, color: ink() });
+        g.save(); g.font = "650 11.5px system-ui, sans-serif"; const tw = g.measureText(compact(total)).width; g.restore();
+        Lab.text(g, i === 0 ? "baseline" : r >= 1 ? `${ratioTxt(r)}x fewer` : `${ratioTxt(1 / r)}x more`, P.x + bl + 12 + tw, y + 14,
+          { size: 10.5, color: muted() });
+      });
+    }
+    Lab.$("#cap-bars").innerHTML = `cost <small>${S.scale === "log" ? "log scale, fixed axes: bars move when a number changes"
+      : "linear, each column scaled to its largest bar"}; colours = which layer the cost comes from</small>`;
+  }
+
+  function draw() {
+    const B = blocks(), [std, bott, dw, inc] = B.list;
+    drawBlocks(B); drawBars(B);
+    const kinds = new Set(B.list.flatMap((b) => b.all.map((l) => l.kind)));
+    if (S.bn) kinds.add("bn");
+    Lab.$("#legend").innerHTML = ["full", "pw", "dw", "proj", "bn"].filter((k) => kinds.has(k))
+      .map((k) => `<span><i style="background:${Lab.color(KIND[k].color)}"></i>${KIND[k].label}</span>`).join("");
+
+    const k2 = S.k * S.k, ci = S.cin, co = S.cout, m = B.mid;
+    const sh = bott.shortcut ? ` + C_in·C_out` : "";
+    const shN = bott.shortcut ? ` + ${ci}·${co}` : "";
+    const lines = [
+      `weights, no bias (C_mid = C_in / r = ${ci} / ${S.r} = ${m}):`,
+      `standard    k²·C_in·C_out                  = ${k2}·${ci}·${co} = <b>${int(std.w)}</b>`,
+      `bottleneck  C_in·C_mid + k²·C_mid² + C_mid·C_out${sh}`,
+      `            = ${ci}·${m} + ${k2}·${m}·${m} + ${m}·${co}${shN} = <b>${int(bott.w)}</b>`,
+      `depthwise   k²·C_in + C_in·C_out           = ${k2}·${ci} + ${ci}·${co} = <b>${int(dw.w)}</b>`,
+      `1x1, k x k  C_in·C_mid + k²·C_mid·C_out    = ${ci}·${m} + ${k2}·${m}·${co} = <b>${int(inc.w)}</b>`,
+    ];
+    if (S.bn) lines.push(`+ BN, 2 per output channel of every conv: ${B.list.map((b) => int(b.bn)).join(", ")}`);
+    lines.push(`MACs of every conv (stride 1) = weights · H·W = weights · ${S.hw}·${S.hw}; standard: <b>${int(std.macs)}</b>`);
+    lines.push(`depthwise / standard = 1/C_out + 1/k² = 1/${co} + 1/${k2} = ${(1 / co + 1 / k2).toFixed(3)} -> <b>${ratioTxt(std.w / dw.w)}x</b> fewer`);
+    Lab.$("#formula").innerHTML = lines.join("\n");
+
+    const rr = (b) => std.params / b.params;
+    const saves = (r, b) => (rr(b) >= 1 ? r.set(`${ratioTxt(rr(b))}x`, "good") : r.set(`${ratioTxt(1 / rr(b))}x more`));
+    saves(rDw, dw); saves(rBott, bott); saves(rInc, inc);
+    rUse.set(`${int(B.hw)} (H·W)`);
+    Lab.$("#note").textContent = "Savings are in parameters (with BN when counted); the MAC savings are the same ratios without BN. "
+      + "Every weight is used once per output pixel, so MACs = weights x H x W.";
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

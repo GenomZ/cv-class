@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sliding-window inference</title>
+<meta name="lab-notebook" content="D3-02">
+<meta name="lab-summary" content="Tile a big image into overlapping windows: see the tiles, how many cover each pixel, the forward-pass cost, and how overlap and Gaussian blending hide the weak predictions near tile borders.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .player { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .player .btn { padding: 4px 9px; min-width: 34px; }
+  .lab-fig { width: 220px; max-width: 100%; }
+  .lab-fig.wide { width: 440px; }
+  .lab-fig.cost { width: 236px; }
+  #note { min-height: 2.9em; margin: 8px 0 0; }
+  #note b { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Sliding-window inference</h1><span class="lab-tag">D3-02 · section 6</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A 200 x 200 image is predicted tile by tile, exactly like <code>sliding_window_predict</code>. The toy model is good in
+    the middle of a tile and poor near its border (little context there). Overlap and blending decide whether those weak borders
+    become seams; the stride decides the cost.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig"><figcaption id="cap-t">tiles</figcaption><div id="f-t"></div></figure>
+        <figure class="lab-fig"><figcaption id="cap-c">tiles per pixel</figcaption><div id="f-c"></div></figure>
+        <figure class="lab-fig"><figcaption id="cap-q">stitched quality</figcaption><div id="f-q"></div></figure>
+      </div>
+      <div class="legend" id="legend" style="margin-top:6px"></div>
+      <div class="lab-figs" style="margin-top:10px">
+        <figure class="lab-fig wide"><figcaption id="cap-s">scan line</figcaption><div id="f-s"></div>
+          <div class="legend" id="legend-s" style="margin-top:2px"></div></figure>
+        <figure class="lab-fig cost"><figcaption>cost <small>forward passes vs stride (log scale)</small></figcaption><div id="f-k"></div></figure>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-geo" class="lab-controls"></div>
+      <div id="c-blend"></div>
+      <div id="c-step" class="ctl"></div>
+      <div class="readouts" id="readouts"></div>
+      <p class="note" id="note"></p>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Set the stride equal to the tile size (no overlap). Where is the stitched quality worst, and why exactly there?
+        <details><summary>why</summary><p>Along every tile border: a pixel at the edge of a tile was predicted with half of its neighbourhood missing.
+          Without overlap each pixel is predicted once, so those weak predictions are the final answer and form a grid of seams.
+          (The last row and column still overlap: the final tile is shifted back to end at the image border, as in <code>sliding_window_predict</code>.)</p></details></li>
+      <li>Back to stride 48 (overlap 16) with <b>uniform</b> averaging. Are the seams gone? Try a smaller stride. Now switch to <b>Gaussian</b>.
+        <details><summary>why</summary><p>Uniform averaging only dilutes the weak edge predictions: they still count as much as the good ones, so the
+          worst inner pixel goes from 0.33 to 0.50 and stays there however small you make the stride. A Gaussian (or Hann) window gives each tile
+          little weight near its own border, so the overlap is filled by the tile that has the pixel near its centre: 0.75 at 16 px overlap,
+          0.95 at 24 px. That is what nnU-Net and MONAI do (Gaussian, sigma = tile / 8).</p></details></li>
+      <li>Predict the number of forward passes at stride 32, then 16, then 8 (tile 64). Check the cost chart.
+        <details><summary>why</summary><p>The number of positions per axis grows like H / s, the passes like (H / s)<sup>2</sup>: halving the stride
+          roughly quadruples the cost (16 &rarr; 36 &rarr; 100 &rarr; 324 here). Overlap of 25-50% of the tile is the usual compromise.</p></details></li>
+      <li>Press play and watch the "tiles per pixel" map fill in. Which pixels end up seen by 4 tiles?
+        <details><summary>why</summary><p>Pixels inside the overlap of two rows <i>and</i> two columns of tiles. The averaging divides by exactly this count
+          (uniform) or by the summed window weights (Gaussian), so every pixel is a proper weighted mean.</p></details></li>
+      <li>With <b>Gaussian</b> blending, set the context ramp to 24 (the model needs more context to be confident). How much overlap do you now need to hide the seams?
+        <details><summary>why</summary><p>Roughly twice the ramp (ramp 12: 24 px overlap gives 0.95; ramp 24: 48 px gives 0.90). Each pixel must be at least
+          one ramp length away from the border of <i>some</i> tile that covers it, and that tile must dominate the blend. Bigger receptive fields need bigger overlaps.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(async () => {
+  const S = Lab.params({ tile: 64, stride: 48, blend: "uniform", ramp: 12, step: -1, row: 30 });
+  const N = 200, Q0 = 0.3;                                   // image side, model quality at the very edge of a tile
+  const MAP = 220, SC = MAP / N;                             // canvas size of the three maps, screen px per image px
+
+  // ---- background: the course photo, 128 px -> 200 px (bilinear), grey
+  const photo = await Lab.photo();
+  const img = new Float32Array(N * N);
+  for (let a = 0; a < N; a++) for (let b = 0; b < N; b++) {
+    const y = Math.max(0, (a + 0.5) * photo.h / N - 0.5), x = Math.max(0, (b + 0.5) * photo.w / N - 0.5);
+    const y0 = Math.floor(y), x0 = Math.floor(x), y1 = Math.min(y0 + 1, photo.h - 1), x1 = Math.min(x0 + 1, photo.w - 1), wy = y - y0, wx = x - x0;
+    const g = (r, c) => photo.gray[r * photo.w + c];
+    img[a * N + b] = (g(y0, x0) * (1 - wx) + g(y0, x1) * wx) * (1 - wy) + (g(y1, x0) * (1 - wx) + g(y1, x1) * wx) * wy;
+  }
+
+  // ---- the reference geometry (cvcourse.day3.sliding_window_predict)
+  function positions(w, s) {
+    const p = []; for (let v = 0; v <= Math.max(N - w, 0); v += s) p.push(v);
+    if (p[p.length - 1] + w < N) p.push(N - w);              // one more window ending exactly at the border
+    return p;
+  }
+  function tiles() { const ys = positions(S.tile, S.stride), xs = positions(S.tile, S.stride), out = []; for (const y of ys) for (const x of xs) out.push({ y, x, shifted: (y > 0 && y % S.stride) || (x > 0 && x % S.stride) }); return { ys, xs, list: out }; }
+  // toy model: quality ramps from Q0 at the tile border to 1 at `ramp` px inside
+  const quality = (d) => Q0 + (1 - Q0) * Math.min(1, d / S.ramp);
+  // blending window inside a tile, at offset u (0..w-1) per axis
+  function win1d(w) {
+    const c = (w - 1) / 2, sig = w / 8, out = new Float64Array(w);
+    for (let u = 0; u < w; u++) out[u] = S.blend === "gaussian" ? Math.exp(-((u - c) ** 2) / (2 * sig * sig)) : S.blend === "hann" ? Math.sin(Math.PI * (u + 0.5) / w) ** 2 : 1;
+    return out;
+  }
+  function stitch(T) {                                          // first T tiles -> count, weight sum, weighted quality, per-tile info
+    const { list } = tiles(), w = S.tile, w1 = win1d(w);
+    const cnt = new Int32Array(N * N), ws = new Float64Array(N * N), qs = new Float64Array(N * N);
+    for (let t = 0; t < Math.min(T, list.length); t++) {
+      const { y, x } = list[t];
+      for (let u = 0; u < w; u++) for (let v = 0; v < w; v++) {
+        const o = (y + u) * N + x + v, d = Math.min(u + 0.5, v + 0.5, w - u - 0.5, w - v - 0.5), wt = Math.max(1e-6, w1[u] * w1[v]);
+        cnt[o] += 1; ws[o] += wt; qs[o] += wt * quality(d);
+      }
+    }
+    const q = new Float64Array(N * N); for (let o = 0; o < N * N; o++) q[o] = cnt[o] ? qs[o] / ws[o] : NaN;
+    return { cnt, q, ws };
+  }
+
+  // ---- figures and controls
+  const ct = Lab.canvas("#f-t", MAP, MAP, { framed: true }), cc = Lab.canvas("#f-c", MAP, MAP, { framed: true }), cq = Lab.canvas("#f-q", MAP, MAP, { framed: true });
+  const cs = Lab.canvas("#f-s", 440, 176), ck = Lab.canvas("#f-k", 236, 176);
+  const nTiles = () => tiles().list.length;
+  const tileCtl = Lab.slider("#c-geo", { label: "tile size w (px)", min: 16, max: N, step: 2, value: S.tile, fmt: (v) => `${v} x ${v}`,
+    onInput: (v) => { S.tile = v; S.stride = Math.min(S.stride, v); strideCtl.input.max = v; strideCtl.set(S.stride); S.step = -1; stop(); redraw(); } });
+  const strideCtl = Lab.slider("#c-geo", { label: "stride s (px)", min: 4, max: S.tile, step: 1, value: S.stride, fmt: (v) => `${v}  (overlap ${S.tile - v} px = ${Math.round(100 * (S.tile - v) / S.tile)}%)`,
+    onInput: (v) => { S.stride = v; S.step = -1; stop(); redraw(); } });
+  const rampCtl = Lab.slider("#c-geo", { label: "context ramp of the toy model (px)", min: 2, max: 32, step: 1, value: S.ramp, fmt: (v) => `${v}`, onInput: (v) => { S.ramp = v; redraw(); } });
+  const rowCtl = Lab.slider("#c-geo", { label: "scan line row y", min: 0, max: N - 1, step: 1, value: S.row, fmt: (v) => `${v}`, onInput: (v) => { S.row = v; redraw(); } });
+  Lab.segmented("#c-blend", { label: "blending of overlapping tiles", options: [{ value: "uniform", label: "uniform" }, { value: "gaussian", label: "Gaussian" }, { value: "hann", label: "Hann" }], value: S.blend, onChange: (v) => { S.blend = v; redraw(); } });
+  const stepCtl = Lab.slider("#c-step", { label: "tiles laid", min: 0, max: nTiles(), step: 1, value: S.step < 0 ? nTiles() : S.step, fmt: (v) => `${v} / ${nTiles()}`, onInput: (v) => { S.step = v; stop(); redraw(); } });
+  const player = Lab.el("div", { class: "player" }); Lab.$("#c-step").append(player);
+  Lab.button(player, "|<", () => { stop(); setStep(0); });
+  Lab.button(player, "<", () => { stop(); setStep(curStep() - 1); });
+  const playBtn = Lab.button(player, "play", () => (timer ? stop() : play()), "primary");
+  Lab.button(player, ">", () => { stop(); setStep(curStep() + 1); });
+  Lab.button(player, ">|", () => { stop(); setStep(nTiles()); });
+  let timer = null;
+  const curStep = () => (S.step < 0 ? nTiles() : Math.min(S.step, nTiles()));
+  function setStep(t) { S.step = Lab.clamp(t, 0, nTiles()); redraw(); }
+  function play() { if (curStep() >= nTiles()) setStep(0); playBtn.textContent = "pause"; timer = setInterval(() => { if (curStep() >= nTiles()) return stop(); setStep(curStep() + 1); }, Math.max(60, 4000 / nTiles())); }
+  function stop() { if (timer) clearInterval(timer); timer = null; playBtn.textContent = "play"; }
+  const R = { passes: Lab.readout("#readouts", "forward passes"), work: Lab.readout("#readouts", "pixels computed"), seam: Lab.readout("#readouts", "worst inner quality"), maxc: Lab.readout("#readouts", "max tiles / pixel") };
+  for (const c of [ct, cc, cq]) Lab.pointer(c, { hover: (p) => { S.row = Lab.clamp(Math.floor(p.y / SC), 0, N - 1); rowCtl.set(S.row); redraw(); } });
+
+  window.labDebug = () => { draw(); const T = tiles(), st = stitch(T.list.length); return { ys: T.ys, xs: T.xs, cnt: Array.from(st.cnt), q: Array.from(st.q), readouts: Object.fromEntries(Object.entries(R).map(([k, r]) => [k, r.el.querySelector(".v").textContent])) }; };
+
+  function draw() {
+    const T = tiles(), n = T.list.length, t = curStep(), w = S.tile;
+    stepCtl.input.max = n; stepCtl.set(t);
+    const st = stitch(t), fin = t === n ? st : stitch(n);
+    const cmax = Math.max(...fin.cnt);
+    const muted = Lab.color("--muted"), C1 = Lab.color("--c1"), HL = Lab.color("--hl");
+
+    // 1. image + tiles
+    const g = ct.ctx; ct.clear();
+    Lab.image(g, img, N, N, 0, 0, MAP, MAP, (v) => Lab.grayRGB(0.25 + 0.6 * v));
+    g.save(); g.fillStyle = Lab.alpha("--surface", 0.35); g.fillRect(0, 0, MAP, MAP); g.restore();
+    T.list.forEach((tl, k) => {
+      const done = k < t, r = [tl.x * SC, tl.y * SC, (tl.x + w) * SC, (tl.y + w) * SC];
+      if (!done) Lab.box(g, r, { color: Lab.alpha("--muted", 0.55), width: 1, dash: [3, 3] });
+      else Lab.box(g, r, { color: tl.shifted ? Lab.color("--c4") : C1, width: 1.5, dash: tl.shifted ? [5, 3] : [], fill: Lab.alpha(tl.shifted ? "--c4" : "--c1", 0.06) });
+    });
+    if (t > 0) { const tl = T.list[t - 1]; Lab.box(g, [tl.x * SC, tl.y * SC, (tl.x + w) * SC, (tl.y + w) * SC], { color: HL, width: 2.5, label: `#${t}` }); }
+    scanLine(g);
+    Lab.$("#cap-t").innerHTML = `tiles <small>${T.ys.length} x ${T.xs.length} = ${n} windows of ${w} px</small>`;
+
+    // 2. coverage count
+    // pixels no tile has reached yet: diagonal stripes, so they cannot be mistaken for a value
+    const stripeA = Lab.rgb(Lab.color("--div-mid")), stripeB = Lab.rgb(Lab.color("--axis"));
+    const notYet = (i) => (((i % N) + Math.floor(i / N)) % 8 < 4 ? stripeA : stripeB);
+    const h = cc.ctx; cc.clear();
+    Lab.image(h, st.cnt, N, N, 0, 0, MAP, MAP, (v, i) => (v ? Lab.sequentialRGB(v / cmax) : notYet(i)));
+    scanLine(h);
+    const levels = [...new Set(fin.cnt)].sort((a, b) => a - b);
+    Lab.$("#cap-c").innerHTML = `tiles per pixel <small>${t < n ? "so far (stripes: not yet)" : `${levels.join(", ")}`}</small>`;
+
+    // 3. stitched quality (grey: white = good, dark = poor)
+    const q = cq.ctx; cq.clear();
+    Lab.image(q, st.q, N, N, 0, 0, MAP, MAP, (v, i) => (Number.isNaN(v) ? notYet(i) : Lab.grayRGB((v - Q0) / (1 - Q0))));
+    scanLine(q);
+    Lab.$("#cap-q").innerHTML = `stitched quality <small>white = 1, black = ${Q0}</small>`;
+    Lab.$("#legend").innerHTML = `<span><i style="background:${C1}"></i>tile at a multiple of the stride</span><span><i style="background:${Lab.color("--c4")}"></i>last tile shifted back to end at the border</span>` +
+      `<span><i style="background:${HL}"></i>tile just laid</span><span>tiles per pixel: <i style="background:${Lab.sequential(1 / cmax)}"></i>1 <i style="background:${Lab.sequential(1)};margin-left:6px"></i>${cmax}</span><span>hover a map to move the scan line</span>`;
+
+    // inner = at least `ramp` px from the image border (the image border is weak whatever you do)
+    let worst = 1;
+    for (let a = S.ramp; a < N - S.ramp; a++) for (let b = S.ramp; b < N - S.ramp; b++) { const v = fin.q[a * N + b]; if (v < worst) worst = v; }
+
+    // 4. scan line: blend weights of the tiles crossing the row, and the stitched quality
+    const s = cs.ctx; cs.clear();
+    const ax = Lab.axes(s, { x: 40, y: 10, w: 388, h: 128, xmin: 0, xmax: N, ymin: 0, ymax: 1.05, xlabel: `column x along row y = ${S.row}`, yticks: [0, 0.5, 1], xticks: [0, 50, 100, 150, 200] });
+    const w1 = win1d(w), row = S.row, crossing = T.list.filter((tl, k) => k < t && row >= tl.y && row < tl.y + w);
+    crossing.forEach((tl) => {
+      const pts = [];
+      for (let x = tl.x; x < tl.x + w; x++) { const o = row * N + x, wt = Math.max(1e-6, w1[row - tl.y] * w1[x - tl.x]); pts.push([x + 0.5, wt / st.ws[o]]); }
+      ax.line(pts, Lab.alpha("--c2", 0.8), 1.5);
+    });
+    const qpts = []; for (let x = 0; x < N; x++) { const v = st.q[row * N + x]; if (!Number.isNaN(v)) qpts.push([x + 0.5, v]); }
+    ax.line(qpts, C1, 2.5);
+    Lab.$("#cap-s").innerHTML = `scan line <small>row ${row}: ${crossing.length} tile${crossing.length === 1 ? "" : "s"} cross it</small>`;
+    Lab.$("#legend-s").innerHTML = `<span><i style="background:${C1}"></i>stitched quality</span><span><i style="background:${Lab.color("--c2")}"></i>share of each tile in the blend (sums to 1)</span>`;
+
+    // 5. cost: passes vs stride, log scale
+    const k = ck.ctx; ck.clear();
+    const passes = (sv) => positions(w, sv).length ** 2, smin = 4, pmax = Math.max(passes(smin), 10);
+    const lg = Math.log10, ymax = Math.ceil(lg(pmax));
+    const ax2 = Lab.axes(k, { x: 44, y: 10, w: 180, h: 128, xmin: smin, xmax: Math.max(w, smin + 1), ymin: 0, ymax, xlabel: "stride s (px)", ylabel: "passes",
+      yticks: Array.from({ length: ymax + 1 }, (_, i) => i), yfmt: (v) => String(10 ** v), xticks: [smin, Math.round((smin + w) / 2), w] });
+    const cpts = []; for (let sv = smin; sv <= w; sv++) cpts.push([sv, lg(passes(sv))]);
+    ax2.line(cpts, C1, 2);
+    ax2.dot(S.stride, lg(n), HL, 5.5);
+    Lab.text(k, `${n}`, ax2.sx(S.stride) + (S.stride > (smin + w) / 2 ? -8 : 8), ax2.sy(lg(n)) - 8, { size: 11, weight: 650, color: Lab.color("--ink"), align: S.stride > (smin + w) / 2 ? "right" : "left" });
+
+    // readouts and note
+    R.passes.set(String(n));
+    R.work.set(`${(n * w * w / (N * N)).toFixed(2)}x`);
+    R.seam.set(worst.toFixed(2), worst > 0.95 ? "good" : worst < 0.75 ? "bad" : "");
+    R.maxc.set(String(cmax));
+    const ov = w - S.stride;
+    Lab.$("#note").innerHTML = ov === 0 ? `<b>No overlap:</b> every pixel is predicted once, so the weak tile borders are the final answer (worst ${worst.toFixed(2)}).`
+      : S.blend === "uniform" ? `<b>${ov} px overlap, uniform mean:</b> a weak border prediction is averaged with a good one, not replaced (worst ${worst.toFixed(2)}).`
+      : `<b>${ov} px overlap, ${S.blend} window:</b> each tile is trusted mostly near its own centre (worst ${worst.toFixed(2)}).`;
+  }
+  function scanLine(g) { g.save(); g.strokeStyle = Lab.color("--hl"); g.setLineDash([4, 3]); g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, (S.row + 0.5) * SC); g.lineTo(MAP, (S.row + 0.5) * SC); g.stroke(); g.restore(); }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Freeze, unfreeze, discriminative LRs</title>
+<meta name="lab-notebook" content="D1-04">
+<meta name="lab-summary" content="ResNet-50 by stage with its true parameter counts: click to freeze / unfreeze, set base LR and decay, and read off trainable parameters, per-group learning rates and the transfer regime.">
+<meta name="lab-height" content="850">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .under { margin-top: 10px; }
+  #formula { font-size: 11.5px; }
+  .regime { background: var(--wash); border-radius: 8px; padding: 8px 10px; border-left: 4px solid var(--accent); }
+  .regime b { display: block; font-size: 14px; color: var(--ink); }
+  .regime span { font-size: 12.5px; color: var(--ink-2); }
+  .readouts .readout { flex: 1 1 110px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Freeze, unfreeze, discriminative LRs</h1><span class="lab-tag">D1-04 · section 3</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">The backbone as the notebook's six stages, with the true parameter counts from torchvision and a new
+    37-class head. Click a stage to freeze or unfreeze it; the learning rates follow <code>param_groups_with_lrs</code>.</p>
+
+  <div class="lab-stage">
+    <div>
+      <p class="lab-cap" id="cap-net">stages</p>
+      <div id="fig-net"></div>
+      <div class="legend" id="legend"></div>
+      <div class="formula under" id="formula"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-main" class="lab-controls"></div>
+      <div class="regime" id="regime"></div>
+      <div class="readouts" id="readouts"></div>
+      <div id="c-lr" class="lab-controls"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Before looking at the bottom bar: which stage holds most of ResNet-50's parameters, and what share?
+        <details><summary>why</summary><p>layer4: 15.0 M, 63 %; stem + layer1 together hold under 1 %. Channels double at every stage and a conv's
+          weights grow with C_in·C_out, so the last stage dominates - and the generic early stages you usually freeze are almost free in parameters.</p></details></li>
+      <li>Set until = layer2 (the notebook's regime C). What fraction still trains? How much compute does it save?
+        <details><summary>why</summary><p>94 % of the parameters still train - freezing the early stages saves little memory for weights. It saves more
+          compute: stem..layer2 run at high resolution and are 44 % of the forward MACs, and the backward pass now stops at layer3
+          (about 12.3 -> 8.6 GMACs per image).</p></details></li>
+      <li>Full fine-tune, base_lr 3e-4, decay 0.3: what learning rate does the stem get? Is it still learning?
+        <details><summary>why</summary><p>3e-4 · 0.3^5 = 7.3e-7, 400x less than the head: in practice almost frozen. The decay is a soft version of
+          freezing; decay = 1 gives every group the same LR, decay = 0.1 makes everything below layer3 practically frozen.</p></details></li>
+      <li>resnet18, until = layer2: compare with the notebook's printout "trainable: 10,512,421 of 11,195,493".
+        <details><summary>why</summary><p>Same numbers: the notebook runs ResNet-18 on a CPU. Its layer4 is 75 % of the model (8.4 M of 11.2 M).</p></details></li>
+      <li>A frozen stage has requires_grad = False. Does its output stay exactly the same during training?
+        <details><summary>answer</summary><p>Not necessarily: in model.train() mode its BatchNorm layers still update their running mean / variance from
+          every batch, so the features drift even though no weight changes. That is why the notebook calls day1.keep_bn_eval(model).</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  // Parameter counts and MACs from torchvision (fc replaced by Linear(., 37)); MACs = conv + linear multiply-adds per image.
+  const MODELS = {
+    resnet50: { px: 224, feat: 2048, total1000: 25557032, stages: [
+      { name: "stem", what: "conv1 7x7 + bn1", shape: "64x56x56", params: 9536, macs: 118013952 },
+      { name: "layer1", what: "3 bottlenecks", shape: "256x56x56", params: 215808, macs: 667942912 },
+      { name: "layer2", what: "4 bottlenecks", shape: "512x28x28", params: 1219584, macs: 1027604480 },
+      { name: "layer3", what: "6 bottlenecks", shape: "1024x14x14", params: 7098368, macs: 1464336384 },
+      { name: "layer4", what: "3 bottlenecks", shape: "2048x7x7", params: 14964736, macs: 809238528 },
+      { name: "fc", what: "Linear 2048 -> 37", shape: "37", params: 75813, macs: 75776 } ] },
+    resnet18: { px: 160, feat: 512, total1000: 11689512, stages: [
+      { name: "stem", what: "conv1 7x7 + bn1", shape: "64x40x40", params: 9536, macs: 60211200 },
+      { name: "layer1", what: "2 basic blocks", shape: "64x40x40", params: 147968, macs: 235929600 },
+      { name: "layer2", what: "2 basic blocks", shape: "128x20x20", params: 525568, macs: 209715200 },
+      { name: "layer3", what: "2 basic blocks", shape: "256x10x10", params: 2099712, macs: 209715200 },
+      { name: "layer4", what: "2 basic blocks", shape: "512x5x5", params: 8393728, macs: 209715200 },
+      { name: "fc", what: "Linear 512 -> 37", shape: "37", params: 18981, macs: 18944 } ] },
+  };
+  const ORDER = ["stem", "layer1", "layer2", "layer3", "layer4", "fc"];
+  const UNTIL = ["none", "stem", "layer1", "layer2", "layer3", "layer4"];
+  const S = Lab.params({ model: "resnet50", until: "layer2", lr: 3e-4, decay: 0.3, cache: false });
+  if (!MODELS[S.model]) S.model = "resnet50";
+  if (!UNTIL.includes(S.until)) S.until = "layer2";
+  S.lr = Lab.clamp(S.lr, 1e-5, 1e-2); S.decay = Lab.clamp(S.decay, 0.1, 1);
+  let hover = -1, msg = "";
+
+  // ---- the notebook's two functions, on stage indices
+  const cut = () => (S.until === "none" ? -1 : ORDER.indexOf(S.until));        // freeze(model, until): stage index <= cut is frozen
+  const trainable = (i) => i > cut();
+  const lrOf = (i) => S.lr * Math.pow(S.decay, ORDER.length - 1 - i);         // param_groups_with_lrs: base_lr * decay ** (5 - i)
+
+  // ---- controls
+  const selUntil = Lab.select("#c-main", { label: "freeze(model, until=...)",
+    options: UNTIL.map((u) => ({ value: u, label: u === "none" ? "None (freeze nothing)" : `"${u}"` })), value: S.until,
+    onChange: (v) => { S.until = v; msg = ""; redraw(); } });
+  Lab.segmented("#c-main", { label: "backbone", value: S.model,
+    options: [{ value: "resnet50", label: "resnet50 (GPU)" }, { value: "resnet18", label: "resnet18 (CPU run)" }],
+    onChange: (v) => { S.model = v; redraw(); } });
+  const tCache = Lab.toggle("#c-main", { label: "cache the features once (no augmentation)", value: S.cache,
+    onChange: (v) => { S.cache = v; redraw(); } });
+  const LRS = [1e-5, 2e-5, 3e-5, 5e-5, 1e-4, 2e-4, 3e-4, 5e-4, 1e-3, 2e-3, 3e-3, 5e-3, 1e-2];
+  S.lr = LRS.reduce((b, x) => (Math.abs(Math.log(x / S.lr)) < Math.abs(Math.log(b / S.lr)) ? x : b), LRS[0]);
+  Lab.slider("#c-lr", { label: "base_lr (the head's LR)", min: 0, max: LRS.length - 1, step: 1, value: LRS.indexOf(S.lr),
+    fmt: (i) => LRS[i].toExponential(0), onInput: (i) => { S.lr = LRS[i]; redraw(); } });
+  Lab.slider("#c-lr", { label: "decay (per stage, going down)", min: 0.1, max: 1, step: 0.05, value: S.decay,
+    fmt: (v) => v.toFixed(2), onInput: (v) => { S.decay = v; redraw(); } });
+  const rTrain = Lab.readout("#readouts", "trainable params");
+  const rPct = Lab.readout("#readouts", "of the model");
+  const rGroups = Lab.readout("#readouts", "optimiser groups");
+  const rCost = Lab.readout("#readouts", "GMACs per image");
+
+  // ---- canvas geometry
+  const c = Lab.canvas("#fig-net", 700, 336);
+  const X0 = 54, CW = (700 - X0) / 6, BOX = { y: 4, h: 108 }, LR = { y: 140, h: 104 }, BAR = { y: 290, h: 30 };
+  const boxRect = (i) => [X0 + i * CW + 4, BOX.y, CW - 8, BOX.h];
+  function barSegments(M) {
+    const total = M.stages.reduce((s, x) => s + x.params, 0);
+    let x = X0;
+    return M.stages.map((st) => { const w = ((700 - X0) * st.params) / total; const seg = [x, w]; x += w; return seg; });
+  }
+  function stageAt(p) {
+    for (let i = 0; i < 6; i++) { const [x, y, w, h] = boxRect(i); if (p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h) return i; }
+    if (p.y >= BAR.y - 4 && p.y <= BAR.y + BAR.h + 4) {
+      const segs = barSegments(MODELS[S.model]);
+      for (let i = 0; i < 6; i++) if (p.x >= segs[i][0] && p.x <= segs[i][0] + Math.max(segs[i][1], 3)) return i;
+    }
+    if (p.y >= LR.y && p.y <= LR.y + LR.h && p.x >= X0) return Math.min(5, Math.floor((p.x - X0) / CW));
+    return -1;
+  }
+  function toggle(i) {
+    if (i < 0) return;
+    if (i === 5) { msg = "The new 37-class head starts random: it is always trained (freeze() never touches fc)."; redraw(); return; }
+    S.until = trainable(i) ? ORDER[i] : (i === 0 ? "none" : ORDER[i - 1]);   // freezing is a prefix: freeze i and below / unfreeze i and above
+    msg = trainable(i) ? `unfroze ${ORDER[i]} and everything above it` : `froze ${ORDER[i]} and everything below it`;
+    selUntil.set(S.until); redraw();
+  }
+  Lab.pointer(c, {
+    down: (p) => toggle(stageAt(p)),
+    hover: (p) => { const h = stageAt(p); if (h !== hover) { hover = h; c.canvas.style.cursor = h >= 0 ? "pointer" : "default"; redraw(); } },
+    leave: () => { hover = -1; redraw(); },
+  });
+
+  const int = (n) => Math.round(n).toLocaleString("en-US");
+  const compact = (n) => (n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 1 : 2) + " M" : n >= 1e3 ? (n / 1e3).toFixed(1) + " k" : String(n));
+  const lrTxt = (v) => v.toExponential(2).replace("e-", "e-");
+  function lock(g, x, y, closed, color) {                    // small padlock icon
+    g.save(); g.strokeStyle = color; g.fillStyle = color; g.lineWidth = 1.6;
+    g.beginPath(); if (closed) g.arc(x + 4.5, y + 4, 3.2, Math.PI, 0); else g.arc(x + 4.5, y + 1.5, 3.2, Math.PI, -0.2); g.stroke();
+    g.fillRect(x, y + 4, 9, 7); g.restore();
+  }
+
+  function draw() {
+    const M = MODELS[S.model], g = c.ctx; c.clear();
+    const ink = Lab.color("--ink"), ink2 = Lab.color("--ink-2"), muted = Lab.color("--muted"), c1 = Lab.color("--c1"), hl = Lab.color("--hl");
+    const total = M.stages.reduce((s, x) => s + x.params, 0);
+    const k = cut();
+    const cacheOn = S.cache && k === 4;
+
+    // stage boxes
+    M.stages.forEach((st, i) => {
+      const [x, y, w, h] = boxRect(i), on = trainable(i), cx = x + w / 2;
+      g.save();
+      g.fillStyle = on ? Lab.alpha("--c1", 0.13) : Lab.color("--wash");
+      g.strokeStyle = i === hover ? hl : on ? c1 : Lab.color("--axis"); g.lineWidth = i === hover ? 2.5 : 1.5;
+      if (!on) g.setLineDash([4, 3]);
+      g.beginPath(); g.roundRect(x, y, w, h, 7); g.fill(); g.stroke(); g.restore();
+      Lab.text(g, st.name, cx, y + 18, { size: 13, weight: 650, align: "center", color: ink });
+      Lab.text(g, st.what, cx, y + 33, { size: 10.5, align: "center", color: muted });
+      Lab.text(g, st.shape, cx, y + 50, { size: 10.5, mono: true, align: "center", color: ink2 });
+      Lab.text(g, compact(st.params), cx, y + 70, { size: 12.5, weight: 650, align: "center", color: ink });
+      const label = on ? (i === 5 ? "new, trained" : "trainable") : "frozen";
+      g.save(); g.font = "600 10.5px system-ui, sans-serif"; const tw = g.measureText(label).width + 22; g.restore();
+      g.save(); g.fillStyle = on ? c1 : Lab.color("--grid"); g.beginPath(); g.roundRect(cx - tw / 2, y + 80, tw, 18, 9); g.fill(); g.restore();
+      const fg = on ? "#ffffff" : ink2;
+      lock(g, cx - tw / 2 + 6, y + 83, !on, fg);
+      Lab.text(g, label, cx - tw / 2 + 18, y + 93, { size: 10.5, weight: 600, color: fg });
+    });
+
+    // learning rate per group, log axis
+    const lo = -10, hi = -2;
+    const ax = Lab.axes(g, { x: X0, y: LR.y, w: 700 - X0, h: LR.h, xmin: 0, xmax: 6, ymin: lo, ymax: hi, xticks: [],
+      yticks: [-10, -8, -6, -4, -2], yfmt: (e) => `1e${e}`, ylabel: "LR (log)" });
+    Lab.text(g, "learning rate of each optimiser group", X0, LR.y - 10, { size: 11.5, weight: 600, color: ink });
+    M.stages.forEach((st, i) => {
+      const cx = X0 + (i + 0.5) * CW;
+      if (!trainable(i) || (cacheOn && i < 5)) {
+        Lab.text(g, "frozen", cx, LR.y + LR.h - 22, { size: 11, align: "center", color: muted });
+        Lab.text(g, "no group", cx, LR.y + LR.h - 8, { size: 10.5, align: "center", color: muted });
+        return;
+      }
+      const v = lrOf(i), top = ax.sy(Lab.clamp(Math.log10(v), lo, hi));
+      g.fillStyle = c1; g.fillRect(cx - 22, top, 44, LR.y + LR.h - top);
+      Lab.text(g, lrTxt(v), cx, Math.max(LR.y + 10, top - 5), { size: 11, weight: 650, align: "center", color: ink });
+    });
+
+    // the cut: freeze(model, until=...)
+    if (k >= 0) {
+      const xc = X0 + (k + 1) * CW;
+      g.save(); g.strokeStyle = hl; g.lineWidth = 2; g.setLineDash([5, 4]);
+      g.beginPath(); g.moveTo(xc, 0); g.lineTo(xc, LR.y + LR.h); g.stroke(); g.restore();
+      Lab.text(g, `until="${S.until}"`, xc - 6, LR.y + 12, { size: 10.5, weight: 600, color: hl, mono: true, align: "right" });
+    }
+
+    // parameters to scale
+    Lab.text(g, `all ${compact(total)} parameters, to scale`, X0, BAR.y - 8, { size: 11.5, weight: 600, color: ink });
+    const segs = barSegments(M);
+    segs.forEach(([x, w], i) => {
+      const on = trainable(i);
+      g.fillStyle = on ? c1 : Lab.alpha("--muted", 0.35); g.fillRect(x, BAR.y, Math.max(1, w - 1), BAR.h);
+      if (i === hover) { g.save(); g.strokeStyle = hl; g.lineWidth = 2; g.strokeRect(x + 1, BAR.y + 1, Math.max(2, w - 3), BAR.h - 2); g.restore(); }
+      const pct = (100 * M.stages[i].params) / total;
+      if (w > 70) Lab.text(g, `${ORDER[i]} ${pct.toFixed(0)} %`, x + w / 2, BAR.y + BAR.h / 2 + 4, { size: 11, weight: 600, align: "center", color: on ? "#ffffff" : ink });
+    });
+    const small = M.stages.map((st, i) => [i, (100 * st.params) / total]).filter(([i]) => segs[i][1] <= 70);
+    Lab.text(g, small.map(([i, p]) => `${ORDER[i]} ${p < 1 ? p.toFixed(2) : p.toFixed(1)} %`).join(" · ") + "  (too thin to label)",
+      X0, BAR.y + BAR.h + 14, { size: 10.5, color: muted });
+
+    // numbers
+    const tr = M.stages.reduce((s, st, i) => s + (trainable(i) ? st.params : 0), 0);
+    const groups = M.stages.filter((_, i) => trainable(i));
+    const fwd = M.stages.reduce((s, st) => s + st.macs, 0);
+    const bwd = 2 * M.stages.reduce((s, st, i) => s + (trainable(i) ? st.macs : 0), 0);
+    rTrain.set(int(tr)); rPct.set(`${((100 * tr) / total).toFixed(1)} %`); rGroups.set(String(cacheOn ? 1 : groups.length));
+    rCost.set(cacheOn ? `${(M.stages[5].macs / 1e9).toFixed(5)}` : k === 4 ? `${((fwd) / 1e9).toFixed(2)}` : `${((fwd + bwd) / 1e9).toFixed(2)}`);
+
+    const tEl = tCache.el.querySelector("input"); tEl.disabled = k !== 4; tCache.el.style.opacity = k === 4 ? 1 : 0.5;
+    const R = k === 4 ? (S.cache
+        ? ["A · linear probe", "Tiny data, a quick baseline, many experiments: run the backbone once, then each run costs seconds. No augmentation."]
+        : ["B · frozen backbone + head", "Small data close to ImageNet: augmentation for the price of one backbone forward pass per image."])
+      : k === -1 ? ["C′ · full fine-tune", "Lots of data or a very different domain (X-rays, satellite): everything adapts. Head first, small discriminative LRs."]
+      : ["C · partial fine-tune", "More data, or further from ImageNet: adapt the late, task-specific stages, keep the generic early filters."];
+    Lab.$("#regime").innerHTML = `<b>${R[0]}</b><span>${R[1]}</span>`;
+
+    Lab.$("#cap-net").innerHTML = `${S.model}, 37 classes <small>click a stage (or its bar) to freeze / unfreeze it${msg ? " - " + msg : ""}</small>`;
+    Lab.$("#legend").innerHTML = `<span><i style="background:${c1}"></i>trainable (requires_grad = True)</span>`
+      + `<span><i style="background:${Lab.alpha("--muted", 0.35)}"></i>frozen (requires_grad = False)</span>`
+      + `<span><i style="background:${hl}"></i>the cut set by until</span>`;
+
+    const frozen = ORDER.slice(0, k + 1);
+    const lines = [`freeze(model, until=${S.until === "none" ? "None" : `"${S.until}"`})   -> frozen: ${frozen.length ? frozen.join(", ") : "nothing"}`];
+    if (cacheOn) {
+      lines.push(`features cached once (${int(fwd - M.stages[5].macs)} MACs per image, one time); the head trains on ${M.feat}-d vectors`);
+    }
+    lines.push(`param_groups_with_lrs(model, base_lr=${S.lr.toExponential(1)}, decay=${S.decay.toFixed(2)}):  lr_i = base_lr · decay^(5 - i)`);
+    M.stages.forEach((st, i) => {
+      if (!trainable(i)) return;
+      const e = ORDER.length - 1 - i;
+      lines.push(`  i=${i}  ${st.name.padEnd(6)}  ${S.lr.toExponential(1)} · ${S.decay.toFixed(2)}^${e} = <b>${lrTxt(lrOf(i))}</b>  ${int(st.params).padStart(11)} params`
+        + (i === 5 ? `  (${M.feat}·37 + 37)` : ""));
+    });
+    lines.push(`trainable ${int(tr)} of ${int(total)} = ${((100 * tr) / total).toFixed(1)} %   (with the 1000-class ImageNet head: ${int(M.total1000)})`);
+    lines.push(cacheOn ? "compute per image per epoch: the head only" : k === 4
+      ? `compute per image per epoch: forward ${(fwd / 1e9).toFixed(2)} GMACs, no backward through the backbone`
+      : `compute per image per epoch ≈ forward ${(fwd / 1e9).toFixed(2)} + backward 2 x ${(bwd / 2e9).toFixed(2)} (trainable stages) = ${((fwd + bwd) / 1e9).toFixed(2)} GMACs`);
+    Lab.$("#formula").innerHTML = lines.join("\n");
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

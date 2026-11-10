@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grid assignment</title>
+<meta name="lab-notebook" content="D2-03">
+<meta name="lab-summary" content="Drag shapes over a G x G grid: the cell holding each box centre is responsible. Watch the (G, G, 5 + C) target tensor, collisions, and how rare positive cells are.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .figrow { display: grid; grid-template-columns: minmax(0, 384fr) minmax(0, 300fr); gap: 14px; align-items: start; }
+  .figrow canvas.lab-canvas { width: 100%; }
+  .tbl-wrap { margin-top: 12px; overflow-x: auto; }
+  table.tgt { border-collapse: separate; border-spacing: 2px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  table.tgt th { font-size: 11px; font-weight: 600; color: var(--ink-2); padding: 0 3px; text-align: center; white-space: nowrap; }
+  table.tgt th.l, table.tgt td.l { text-align: left; }
+  table.tgt td { padding: 3px 5px; text-align: center; border-radius: 4px; white-space: nowrap; color: var(--ink); }
+  table.tgt td.v { min-width: 38px; }
+  table.tgt tr.sel td.l:first-child { box-shadow: inset 3px 0 0 var(--hl); }
+  table.tgt td.st { text-align: left; color: var(--ink-2); }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .ok::before { content: "\2713 "; color: var(--good); font-weight: 700; }
+  .ko::before { content: "\2717 "; color: var(--bad); font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Grid assignment</h1><span class="lab-tag">D2-03 · section 1</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A dense detector predicts one vector per grid cell. Training needs the same layout as a target:
+    the cell that contains the <b>centre of the box</b> is responsible for the object, every other cell must say
+    "no object". Drag the shapes (corner handle = resize) and watch <code>grid_targets</code> fill the tensor.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="figrow">
+        <figure class="lab-fig"><figcaption id="cap-img">image</figcaption><div id="fig-img"></div></figure>
+        <figure class="lab-fig"><figcaption id="cap-ten">target tensor T, one map per channel</figcaption><div id="fig-ten"></div></figure>
+      </div>
+      <div class="tbl-wrap">
+        <p class="lab-cap">what <code>grid_targets</code> leaves in each object's cell <small>(the final tensor, after all objects were written in order)</small></p>
+        <table class="tgt" id="tbl"></table>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-main" class="lab-controls"></div>
+      <div class="formula" id="formula"></div>
+      <div class="readouts" id="readouts"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Drag the small square into the circle's cell (or switch to <b>G = 4</b>). What will <code>T</code> hold for that cell:
+        both boxes, their average, or one of them? Read the table.
+        <details><summary>why</summary><p>A cell has room for one box. <code>grid_targets</code> writes the objects in order, so the later
+          box overwrites the earlier one, while the class part is only ever set to 1, never cleared: the cell ends up "two-hot"
+          with the second object's box. <code>dense_loss</code> takes the argmax of the class part (the first 1), so the cell may be
+          trained on one object's box with the other object's class, and the first object is invisible to training.
+          YOLOv2 answered with several anchors per cell, YOLOv3 / FPN with several grids of different strides.</p></details></li>
+      <li>Now set <b>G = 16</b>. Is the collision gone? What happened to <b>positive cells / all cells</b>?
+        <details><summary>why</summary><p>Cells are 8 px, so the centres land in different cells. But 3 objects now make 3 positive
+          cells out of 256 (about 1%): 99% of the objectness channel says "no object". Real dense detectors have tens of thousands
+          of cells or anchors per image and a handful of objects; section 5 (focal loss) deals with exactly this imbalance.</p></details></li>
+      <li>Drag the circle slowly to the right across a grid line while watching channel 1 (<code>cx</code>) and the highlighted cell.
+        <details><summary>why</summary><p><code>cx</code> changes smoothly (it is normalised to the image), but responsibility jumps to the
+          neighbouring cell within one pixel. Two cells that see almost the same pixels get opposite objectness targets, which is why
+          YOLOv1's boxes near cell borders are unstable, and why later heads make several nearby locations positive (FCOS, section 6).</p></details></li>
+      <li>At <b>G = 16</b>, make the triangle large with its corner handle. How many cells does it cover, and how many of them are positive?
+        <details><summary>why</summary><p>One: the cell that holds the box centre. All the other cells that see most of the triangle must
+          predict objectness 0, which is a hard target to learn. Note also that the "+" (box centre) is not the triangle's visual
+          centre: the target is defined by the box, not by the shape.</p></details></li>
+      <li>Predict <code>T[..., 1]</code> (<code>cx</code>) for the same object at G = 4 and at G = 16, then check.
+        <details><summary>answer</summary><p>Identical: in this notebook the target box is normalised to the <i>image</i>, not to the cell.
+          The cell index carries the coarse position; the model's decoding in section 2, <code>cx = (j + sigmoid(t_x)) / G</code>,
+          maps its cell-relative output back into this layout.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const SIZE = 128, PX = 3, C = 3, CH = 5 + C;                       // 128 px shapes images, as in the notebook
+  const NAMES = ["circle", "square", "triangle"];
+  const SHORT = ["circ", "sq", "tri"];
+  const FILL = ["--c8", "--c1", "--c6"];                             // red circles, blue squares, green triangles (as the dataset)
+  const DEFAULT_OBJS = "0,38,44,13;1,58,52,6;2,94,92,20;1,98,28,11";
+  const S = Lab.params({ grid: 8, n: 3, objs: DEFAULT_OBJS, sel: 0 });
+  if (![4, 8, 16].includes(S.grid)) S.grid = 8;
+  S.n = Lab.clamp(Math.round(S.n), 2, 4);
+
+  function parseObjs(s) {
+    const fb = DEFAULT_OBJS.split(";");
+    const out = String(s).split(";").map((t) => t.split(",").map(Number)).filter((a) => a.length === 4 && a.every(Number.isFinite));
+    while (out.length < 4) out.push(fb[out.length].split(",").map(Number));
+    return out.slice(0, 4).map(([cls, cx, cy, r]) => clampObj({ cls: Lab.clamp(Math.round(cls), 0, 2), cx: Math.round(cx), cy: Math.round(cy), r: Math.round(r) }));
+  }
+  function clampObj(o) {
+    o.r = Lab.clamp(o.r, 4, 40);
+    o.cx = Lab.clamp(o.cx, o.r, SIZE - 1 - o.r); o.cy = Lab.clamp(o.cy, o.r, SIZE - 1 - o.r);
+    return o;
+  }
+  const objs = parseObjs(S.objs);
+  S.sel = Lab.clamp(Math.round(S.sel), 0, S.n - 1);
+  const active = () => objs.slice(0, S.n);
+
+  // ---- the maths: shapes._draw (pixel test + tight box) and shapes.grid_targets, line by line
+  function inside(o, x, y) {
+    if (o.cls === 0) return (x - o.cx) ** 2 + (y - o.cy) ** 2 <= o.r ** 2;
+    if (o.cls === 1) return Math.abs(x - o.cx) <= o.r && Math.abs(y - o.cy) <= o.r;
+    const baseY = o.cy + o.r * 0.6, apexY = o.cy - o.r;               // triangle, apex up
+    const t = Math.max((y - apexY) / Math.max(baseY - apexY, 1e-6), 0);
+    return y >= apexY && y <= baseY && Math.abs(x - o.cx) <= o.r * t;
+  }
+  function boxOf(o) {                                                // [xs.min(), ys.min(), xs.max() + 1, ys.max() + 1]
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    for (let y = Math.max(0, o.cy - o.r - 1); y <= Math.min(SIZE - 1, o.cy + o.r + 1); y++)
+      for (let x = Math.max(0, o.cx - o.r - 1); x <= Math.min(SIZE - 1, o.cx + o.r + 1); x++)
+        if (inside(o, x, y)) { x1 = Math.min(x1, x); y1 = Math.min(y1, y); x2 = Math.max(x2, x + 1); y2 = Math.max(y2, y + 1); }
+    return [x1, y1, x2, y2];
+  }
+  function gridTargets(list, G) {
+    const T = new Float32Array(G * G * CH);                          // (G, G, 5 + C), channels last, like the notebook
+    const cell = SIZE / G, info = [];
+    list.forEach((o, k) => {
+      const b = boxOf(o), cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+      const i = Math.floor(cy / cell), j = Math.floor(cx / cell);  // int(cy // cell), int(cx // cell)
+      const a = (i * G + j) * CH;
+      T[a] = 1;
+      T[a + 1] = cx / SIZE; T[a + 2] = cy / SIZE; T[a + 3] = (b[2] - b[0]) / SIZE; T[a + 4] = (b[3] - b[1]) / SIZE;
+      T[a + 5 + o.cls] = 1;
+      info.push({ k, o, b, cx, cy, i, j });
+    });
+    for (const r of info) {
+      r.mates = info.filter((q) => q.i === r.i && q.j === r.j).map((q) => q.k);
+      r.last = r.mates[r.mates.length - 1];
+    }
+    return { T, info, cell };
+  }
+  const at = (T, G, i, j) => Array.from(T.subarray((i * G + j) * CH, (i * G + j + 1) * CH));
+  const argmax = (v) => v.reduce((m, x, i) => (x > v[m] ? i : m), 0);
+
+  // ---- canvases and controls
+  const cimg = Lab.canvas("#fig-img", SIZE * PX, SIZE * PX, { framed: true });
+  const cten = Lab.canvas("#fig-ten", 300, 384);
+  Lab.segmented("#c-main", { label: "grid G (cells per side)", options: [4, 8, 16], value: S.grid, onChange: (v) => { S.grid = v; redraw(); } });
+  Lab.segmented("#c-main", { label: "objects", options: [2, 3, 4], value: S.n, onChange: (v) => { S.n = v; S.sel = Math.min(S.sel, v - 1); syncClass(); redraw(); } });
+  const clsCtl = Lab.segmented("#c-main", { label: "class of the selected object", options: NAMES.map((x, i) => ({ value: i, label: x })), value: objs[S.sel].cls,
+    onChange: (v) => { objs[S.sel].cls = v; clampObj(objs[S.sel]); redraw(); } });
+  function syncClass() { clsCtl.set(objs[S.sel].cls); }
+  const rPos = Lab.readout("#readouts", "positive cells");
+  const rShare = Lab.readout("#readouts", "positive share");
+  const rLost = Lab.readout("#readouts", "objects lost");
+
+  // ---- pointer: move (inside the box) or resize (corner handle)
+  let drag = null, hover = null;
+  function hit(p) {
+    const x = p.x / PX, y = p.y / PX, list = active();
+    for (let k = list.length - 1; k >= 0; k--) {
+      const b = boxOf(list[k]);
+      if (Math.abs(p.x - b[2] * PX) <= 9 && Math.abs(p.y - b[3] * PX) <= 9) return { k, mode: "resize" };
+    }
+    for (let k = list.length - 1; k >= 0; k--) {
+      const b = boxOf(list[k]);
+      if (x >= b[0] - 1 && x <= b[2] + 1 && y >= b[1] - 1 && y <= b[3] + 1) return { k, mode: "move" };
+    }
+    return null;
+  }
+  function setHover(p) {
+    const cell = SIZE / S.grid;
+    const i = Math.floor(p.y / PX / cell), j = Math.floor(p.x / PX / cell);
+    hover = i >= 0 && j >= 0 && i < S.grid && j < S.grid ? { i, j } : null;
+  }
+  Lab.pointer(cimg, {
+    down(p) {
+      const h = hit(p); setHover(p);
+      if (h) {
+        S.sel = h.k; syncClass();
+        const o = objs[h.k];
+        drag = { ...h, dx: p.x / PX - o.cx, dy: p.y / PX - o.cy };
+      }
+      redraw();
+    },
+    move(p) {
+      setHover(p);
+      if (drag) {
+        const o = objs[drag.k];
+        if (drag.mode === "move") { o.cx = Math.round(p.x / PX - drag.dx); o.cy = Math.round(p.y / PX - drag.dy); }
+        else o.r = Math.round(Math.max(Math.abs(p.x / PX - o.cx), Math.abs(p.y / PX - o.cy)) - 0.5);
+        clampObj(o);
+      }
+      redraw();
+    },
+    up() { drag = null; },
+    hover(p) {
+      setHover(p);
+      const h = hit(p);
+      cimg.canvas.style.cursor = h ? (h.mode === "resize" ? "nwse-resize" : "move") : "default";
+      redraw();
+    },
+    leave() { hover = null; redraw(); },
+  });
+
+  // ---- drawing
+  const f3 = (v) => (v === 0 ? "0" : v === 1 ? "1" : v.toFixed(3));
+  function draw() {
+    const G = S.grid, list = active();
+    const { T, info, cell } = gridTargets(list, G);
+    const sel = info[S.sel];
+    const ink = Lab.color("--ink"), hl = Lab.color("--hl");
+
+    // image: the objects rasterised exactly like the dataset, drawn at 3x
+    const surf = Lab.rgb(Lab.color("--surface")), inkc = Lab.rgb(Lab.color("--ink"));
+    const bg = surf.map((v, i) => Math.round(v + (inkc[i] - v) * 0.07));
+    const fills = FILL.map((n) => Lab.rgb(Lab.color(n)));
+    const lab = new Uint8Array(SIZE * SIZE);
+    for (const o of list) {
+      for (let y = Math.max(0, o.cy - o.r - 1); y <= Math.min(SIZE - 1, o.cy + o.r + 1); y++)
+        for (let x = Math.max(0, o.cx - o.r - 1); x <= Math.min(SIZE - 1, o.cx + o.r + 1); x++)
+          if (inside(o, x, y)) lab[y * SIZE + x] = o.cls + 1;
+    }
+    const g = cimg.ctx; cimg.clear();
+    Lab.image(g, lab, SIZE, SIZE, 0, 0, SIZE * PX, SIZE * PX, (v) => (v ? fills[v - 1] : bg));
+    // responsible cells (and collisions)
+    const cells = new Map();
+    for (const r of info) cells.set(r.i * G + r.j, r);
+    g.save();
+    for (const r of cells.values()) {
+      const collide = r.mates.length > 1;
+      g.fillStyle = Lab.alpha("--c4", collide ? 0.28 : 0.42);
+      g.fillRect(r.j * cell * PX, r.i * cell * PX, cell * PX, cell * PX);
+    }
+    // grid
+    g.strokeStyle = Lab.alpha("--ink", 0.28); g.lineWidth = 1;
+    for (let k = 1; k < G; k++) {
+      const v = Math.round(k * cell * PX) + 0.5;
+      g.beginPath(); g.moveTo(v, 0); g.lineTo(v, SIZE * PX); g.moveTo(0, v); g.lineTo(SIZE * PX, v); g.stroke();
+    }
+    for (const r of cells.values()) {
+      const collide = r.mates.length > 1;
+      g.strokeStyle = collide ? Lab.color("--bad") : ink; g.lineWidth = collide ? 3 : 2; g.setLineDash([]);
+      g.strokeRect(r.j * cell * PX + 1, r.i * cell * PX + 1, cell * PX - 2, cell * PX - 2);
+      if (collide) Lab.text(g, `${r.mates.length} objects!`, r.j * cell * PX + 3, (r.i + 1) * cell * PX - 4, { size: 10.5, weight: 700, color: ink });
+    }
+    g.restore();
+    // boxes, centres, labels, handles
+    info.forEach((r) => {
+      const isSel = r.k === S.sel;
+      const B = r.b.map((v) => v * PX);
+      Lab.box(g, B, { color: isSel ? hl : Lab.color("--c3"), dash: [5, 3], width: isSel ? 2.5 : 1.8 });
+      const cx = r.cx * PX, cy = r.cy * PX;
+      g.save(); g.strokeStyle = ink; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(cx - 6, cy); g.lineTo(cx + 6, cy); g.moveTo(cx, cy - 6); g.lineTo(cx, cy + 6); g.stroke(); g.restore();
+      const ty = B[1] - 5 < 12 ? B[3] + 14 : B[1] - 5;
+      Lab.text(g, `#${r.k + 1}`, B[0], ty, { size: 12, weight: 700, color: ink });
+      g.save(); g.fillStyle = isSel ? hl : Lab.color("--surface"); g.strokeStyle = isSel ? hl : ink; g.lineWidth = 1.5;
+      g.fillRect(B[2] - 4, B[3] - 4, 8, 8); g.strokeRect(B[2] - 4, B[3] - 4, 8, 8); g.restore();
+    });
+    if (hover) {
+      g.save(); g.strokeStyle = hl; g.lineWidth = 2; g.setLineDash([4, 3]);
+      g.strokeRect(hover.j * cell * PX + 2, hover.i * cell * PX + 2, cell * PX - 4, cell * PX - 4); g.restore();
+    }
+
+    // tensor: one heat map per channel (3 x 3 layout, 9th slot = the shape)
+    const t = cten.ctx; cten.clear();
+    const names = ["objectness", "cx", "cy", "w", "h", ...NAMES.map((n) => "class " + n)];
+    const pw = 96, gapx = (300 - 3 * pw) / 2;
+    for (let c = 0; c < CH + 1; c++) {
+      const x = (c % 3) * (pw + gapx), y = Math.floor(c / 3) * (pw + 20) + 14;
+      if (c === CH) {
+        Lab.text(t, "T.shape =", x + 4, y + 16, { size: 11, weight: 600, mono: true, color: ink });
+        Lab.text(t, "(G, G, 5+C)", x + 4, y + 33, { size: 11, mono: true });
+        Lab.text(t, `(${G}, ${G}, ${CH})`, x + 4, y + 52, { size: 13, weight: 700, mono: true, color: ink });
+        Lab.text(t, "channels last;", x + 4, y + 72, { size: 10.5, color: Lab.color("--muted") });
+        Lab.text(t, "the loss sees", x + 4, y + 85, { size: 10.5, color: Lab.color("--muted") });
+        Lab.text(t, `(N, ${CH}, ${G}, ${G})`, x + 4, y + 98, { size: 10.5, color: Lab.color("--muted") });
+        continue;
+      }
+      Lab.text(t, `${c}: ${names[c]}`, x, y - 4, { size: 11, weight: 600 });
+      const ch = new Float32Array(G * G);
+      for (let k = 0; k < G * G; k++) ch[k] = T[k * CH + c];
+      Lab.image(t, ch, G, G, x, y, pw, pw, (v) => Lab.sequentialRGB(v));
+      t.save(); t.strokeStyle = Lab.color("--border"); t.strokeRect(x + 0.5, y + 0.5, pw - 1, pw - 1);
+      const cw = pw / G;
+      if (hover) { t.strokeStyle = hl; t.lineWidth = 2; t.strokeRect(x + hover.j * cw + 1, y + hover.i * cw + 1, cw - 2, cw - 2); }
+      if (sel) { t.strokeStyle = ink; t.lineWidth = 1.5; t.setLineDash([2, 2]); t.strokeRect(x + sel.j * cw - 1, y + sel.i * cw - 1, cw + 2, cw + 2); }
+      t.restore();
+    }
+
+    // captions
+    const hv = hover ? at(T, G, hover.i, hover.j) : null;
+    Lab.$("#cap-img").innerHTML = `image <small>${SIZE} x ${SIZE} px, cell = ${SIZE} / ${G} = ${cell} px` +
+      (hover ? ` · pointer on cell (row ${hover.i}, col ${hover.j}): ${hv[0] ? "positive" : "negative - objectness 0; its box and class channels are ignored by the loss"}` : "") + `</small>`;
+    const key = (v) => `<i class="sw" style="background:rgb(${Lab.sequentialRGB(v)});margin:0 3px 0 4px;border:1px solid var(--border)"></i>`;
+    Lab.$("#cap-ten").innerHTML = `target tensor T <small>${key(0)}0 ${key(0.5)}0.5 ${key(1)}1 · dashed: selected object's cell</small>`;
+
+    // table: the final T at each object's cell
+    const sw = (c) => `<i class="sw" style="background:${Lab.color(FILL[c])}"></i>`;
+    let h = `<tr><th class="l">object</th><th>centre (cx, cy)</th><th>cell (row, col)</th>` +
+      ["obj", "cx", "cy", "w", "h", ...SHORT].map((s, c) => `<th title="channel ${c}">${c}: ${s}</th>`).join("") + `<th class="l">status</th></tr>`;
+    for (const r of info) {
+      const v = at(T, G, r.i, r.j);
+      const cells = v.map((x) => { const c = Lab.sequentialRGB(x); return `<td class="v" style="background:rgb(${c});color:${Lab.inkOn(c)}">${f3(x)}</td>`; }).join("");
+      let st;
+      if (r.mates.length === 1) st = `<span class="ok">alone in its cell</span>`;
+      else if (r.last !== r.k) st = `<span class="ko">box overwritten by #${r.last + 1}</span>`;
+      else {
+        const am = argmax(v.slice(5));
+        st = am === r.o.cls ? `<span class="ok">box kept (written last)</span>` : `<span class="ko">box kept, but argmax of the class part = ${NAMES[am]}</span>`;
+      }
+      h += `<tr class="${r.k === S.sel ? "sel" : ""}"><td class="l">${sw(r.o.cls)}#${r.k + 1} ${NAMES[r.o.cls]}</td><td>(${r.cx}, ${r.cy})</td><td>(${r.i}, ${r.j})</td>${cells}<td class="st">${st}</td></tr>`;
+    }
+    Lab.$("#tbl").innerHTML = h;
+
+    // formula for the selected object
+    if (sel) {
+      const v = at(T, G, sel.i, sel.j), b = sel.b;
+      const box = v.slice(1, 5).map((x) => x.toFixed(3)).join(", ");
+      Lab.$("#formula").innerHTML =
+        `#${sel.k + 1} ${NAMES[sel.o.cls]}, box [${b.join(", ")}]\n` +
+        `cx = (${b[0]} + ${b[2]}) / 2 = ${sel.cx}\n` +
+        `cy = (${b[1]} + ${b[3]}) / 2 = ${sel.cy}\n` +
+        `row = int(${sel.cy} // ${cell}) = <b>${sel.i}</b>\n` +
+        `col = int(${sel.cx} // ${cell}) = <b>${sel.j}</b>\n` +
+        `T[${sel.i}, ${sel.j}, 0]   = ${f3(v[0])}\n` +
+        `T[${sel.i}, ${sel.j}, 1:5] = [cx, cy, w, h] / ${SIZE}\n` +
+        `  = [${box}]\n` +
+        `T[${sel.i}, ${sel.j}, 5:]  = [${v.slice(5).map(f3).join(", ")}]` +
+        (sel.last !== sel.k ? `\n<b>box overwritten by #${sel.last + 1}</b>` : "");
+    }
+
+    // readouts
+    const npos = cells.size, lost = list.length - npos;
+    rPos.set(`${npos} / ${G * G}`);
+    rShare.set(`${(100 * npos / (G * G)).toFixed(1)}%`);
+    rLost.set(String(lost), lost ? "bad" : "good");
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${Lab.alpha("--c4", 0.6)}"></i>responsible cell</span>` +
+      `<span><i style="background:${Lab.color("--bad")}"></i>collision</span>` +
+      `<span><i style="background:${Lab.color("--c3")}"></i>box (dashed)</span>` +
+      `<span><b style="color:${ink}">+</b>&nbsp;box centre</span>`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

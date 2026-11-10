@@ -42,7 +42,7 @@ CELLS = [
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle, Patch
     import torch, torch.nn as nn, torch.nn.functional as F
-    from cvcourse import viz, convops, seg, shapes, tests, torchkit, day3
+    from cvcourse import viz, convops, seg, shapes, tests, torchkit, day3, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -65,6 +65,8 @@ CELLS = [
     | **semantic** | a class | one blob labelled "cat" | no |
     | **instance** | a class + an instance id, *things only* | "cat #1", "cat #2" | yes |
     | **panoptic** | class + id for *things*, class only for *stuff* (sky, road, grass) | "cat #1", "cat #2", "background" | yes |
+
+    (*Things* are countable objects such as cats, cars, people; *stuff* is amorphous background such as sky, road or grass.)
 
     The Oxford-IIIT Pet image below happens to contain **two** Bengal cats. The dataset gives
     a *trimap* (pet / background / uncertain border) and one head box per animal.
@@ -233,15 +235,28 @@ CELLS = [
     for k, (lab, col) in enumerate([("pixel accuracy", "#BAB0AC"), ("IoU of the object", "#E45756"), ("mIoU", "#4C78A8")]):
         axes[3].bar(x + (k - 1) * 0.27, [r[k + 1] for r in rows[1:]], 0.27, label=lab, color=col)
     axes[3].set_xticks(x); axes[3].set_xticklabels(names); axes[3].set_ylim(0, 1.1); axes[3].legend(fontsize=8, loc="upper right")
-    axes[3].set_title("the useless model wins on accuracy")
+    axes[3].set_title("accuracy cannot tell them apart; IoU can")
     plt.tight_layout(); plt.show()
     print(f"object covers {gt.mean():.1%} of the image")
     """),
     md(r"""
+    Compare the two predictions in the bar chart: the model that found nothing and the decent offset
+    circle both score about 0.98 pixel accuracy; only the IoU of the object (0 vs 0.57) tells them apart.
+
+    ### Lab · segmentation metrics
+    **Predict first:** a perfect prediction is shifted one pixel to the right. Which loses more IoU, a large
+    blob or a vessel 2 pixels wide, and roughly how much? Pick the presets in the lab to check, then work through
+    the "Try this" list under it (4-5 minutes).
+    """),
+    code("""
+    labs.show("seg-metrics")
+    """),
+    md(r"""
     ### Exercise 2 · Dice coefficient
 
-    For two binary masks $A$ (prediction) and $B$ (target): $\text{Dice} = \frac{2|A \cap B|}{|A| + |B|}$.
-    Two lines with NumPy boolean arrays.
+    For two binary masks $A$ (prediction) and $B$ (target): $\text{Dice} = \frac{2|A \cap B|}{|A| + |B|}$
+    (in the lab's terms, $2TP / (2TP + FP + FN)$). Two lines with NumPy boolean arrays; return a Python
+    `float`, with `eps` added to numerator and denominator so that two empty masks score 1.
     """),
     exercise(
         stub="""
@@ -265,8 +280,9 @@ CELLS = [
 
     For $C$ classes, count pixels in a $C \times C$ matrix: row = true class, column =
     predicted class. The diagonal is $TP_c$; the rest of column $c$ is $FP_c$; the rest of
-    row $c$ is $FN_c$. Below: a shapes image and a deliberately flawed "prediction"
-    (the square shifted, the triangle called a square, the circles shrunk).
+    row $c$ is $FN_c$. (The 2x2 matrix in the lab is the case $C = 2$.) Below: a shapes image
+    and a deliberately flawed "prediction" (the square shifted, the triangle called a square,
+    the circles shrunk).
     """),
     code("""
     rng = np.random.default_rng(7)
@@ -298,6 +314,9 @@ CELLS = [
     print(f"pixel accuracy {seg.pixel_accuracy(pred, s_mask):.3f} vs mIoU {np.nanmean(iou):.3f}")
     """),
     md(r"""
+    Read the off-diagonal cells: every triangle pixel sits in row "triangle", column "square", so the
+    triangle's IoU is 0, while pixel accuracy barely notices because the background dominates the count.
+
     ### Exercise 3 · mIoU from the confusion matrix
 
     Use the matrix (rows = target, columns = prediction). A class absent from both the
@@ -329,7 +348,7 @@ CELLS = [
 
     Both count the same pixels, so they are monotonically related: with $I$ = IoU,
     $\text{Dice} = \frac{2I}{1 + I}$. Dice is always $\geq$ IoU (it looks more generous), and
-    they agree at 0 and 1. Rankings of models are identical *per image*; averaged over a
+    they agree at 0 and 1 (the curve in the lab: every mask you painted sat on it). Rankings of models are identical *per image*; averaged over a
     dataset they can differ slightly. Medical imaging reports Dice, natural-image benchmarks
     report mIoU - convert before you compare papers.
     """),
@@ -372,7 +391,8 @@ CELLS = [
     ### Exercise 4 · soft Dice loss in PyTorch
 
     `prob` and `target` have the same shape (any shape); compute **one** Dice over the whole
-    batch. Use torch operations only, so autograd can differentiate it.
+    batch and return the loss $1 - \text{Dice}$ as a 0-dim tensor. Use torch operations only, so
+    autograd can differentiate it.
     """),
     exercise(
         stub="""
@@ -444,6 +464,8 @@ CELLS = [
     md(r"""
     ## 4 · Getting the resolution back
 
+    We can now score a per-pixel prediction and train it with a per-pixel loss; the missing piece is a
+    network whose output has the resolution of the input.
     A classification backbone shrinks a 224 px image to a 7x7 grid (stride 32): perfect for
     "what", fatal for "where". The first fully convolutional segmenter (FCN, 2015) simply
     upsampled that 7x7 map 32x. See what that does to a mask:
@@ -461,6 +483,9 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Watch the IoU in the titles and the thin parts (ears, paws, tail): at stride 32 the coarse grid still
+    knows *what* is there, but not *where* its outline runs.
+
     Three ways to learn an upsampling, plus one way to avoid downsampling:
 
     | tool | idea | parameters | watch out |
@@ -511,10 +536,20 @@ CELLS = [
     HTML(anim.to_jshtml())
     """),
     md(r"""
+    ### Lab · transposed convolution
+    **Predict first:** stride 2, a 3x3 kernel of ones and an input of ones. Is the output constant away
+    from the border? If not, which values appear? Step through the stamps in the lab, hover the output
+    pixels, then work through the "Try this" list (4-5 minutes).
+    """),
+    code("""
+    labs.show("transposed-conv")
+    """),
+    md(r"""
     ### Exercise 5 · `transposed_conv2d`
 
     Single channel, no padding: allocate the `(H-1)*s + kh` by `(W-1)*s + kw` output and
-    add `x[i, j] * k` into the window starting at `(i*s, j*s)`.
+    add `x[i, j] * k` into the window starting at `(i*s, j*s)` - the stamp you stepped through in
+    the lab. Return the output as a float NumPy array.
     """),
     exercise(
         stub="""
@@ -562,7 +597,7 @@ CELLS = [
     input pixels depending on their parity; with kernel 4 every interior pixel receives
     exactly 4. Uneven overlap = a periodic pattern baked into every upsampled map, and stacking
     layers makes it worse (Odena et al., Distill 2016). Count the overlaps with an all-ones
-    input and kernel:
+    input and kernel (the "stamps per output pixel" map of the lab):
     """),
     code("""
     ones = np.ones((6, 6))
@@ -739,7 +774,7 @@ CELLS = [
     Which input pixels can influence the centre output after three 3x3 layers? Ask autograd:
     the gradient of the centre output w.r.t. the input is non-zero exactly on the receptive
     field. Equal rates (2, 2, 2) leave **holes** (the "gridding" problem), which is why
-    DeepLabv3 and HDC use rates with no common factor.
+    DeepLabv3 and HDC (hybrid dilated convolution, Wang et al. 2018) use rates with no common factor.
     """),
     code("""
     def rf_map(dilations, n=33):
@@ -763,7 +798,8 @@ CELLS = [
     """),
     md(r"""
     **ASPP** (Atrous Spatial Pyramid Pooling, DeepLabv3) runs several dilated 3x3 convs in
-    *parallel* on the same feature map (rates 6, 12, 18 at output stride 16), plus a 1x1
+    *parallel* on the same feature map (rates 6, 12, 18 at output stride 16, i.e. a feature map
+    16x smaller than the input), plus a 1x1
     conv and a global-average-pooled branch, and concatenates them: multi-scale context in
     one layer. Each branch samples the map like this:
     """),

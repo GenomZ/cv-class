@@ -45,7 +45,7 @@ CELLS = [
     from torch.utils.data import DataLoader, Subset
     from torchvision.ops import roi_align
     from PIL import Image
-    from cvcourse import viz, boxes, tests, torchkit, day3
+    from cvcourse import viz, boxes, tests, torchkit, day3, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -108,12 +108,29 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    What to look at: the target (right) is soft along the person's outline, because `roi_align`
+    averages the binary mask inside each of the 28x28 cells, and it does not quite reach the grid's
+    borders, because the proposal box is a few pixels larger than the person. At inference the
+    predicted 28x28 map makes the opposite trip: stretched back over the detected box.
+
+    ### Lab · Mask paste-back
+    **Predict first:** the same person fills a 32 px box in one image and a 340 px box in another,
+    and both get a perfect 28x28 mask. Which pasted mask has the higher mask IoU with the true shape?
+    Use the lab's box-size buttons to check, then work through its "Try this" list (5 minutes).
+    """),
+    code("""
+    labs.show("mask-paste")
+    """),
+    md(r"""
     ### Exercise 1 · `paste_mask`
 
     Given a `(28, 28)` probability map, a box `(x1, y1, x2, y2)` (floats) and the image size
     `(H, W)`: resize the map to the box (`x0 = floor(x1)`, `w = ceil(x2) - x0`, same for y;
     bilinear via `F.interpolate`), threshold at 0.5, write it at `(y0, x0)` into an empty
     `(H, W)` boolean image, and **clip** the parts of the box that fall outside the image.
+    `F.interpolate` expects a `(N, C, H, W)` tensor, so give the map two leading dimensions
+    and use `mode="bilinear", align_corners=False`: exactly the 4-cell weights you hovered in
+    the lab. Return the `(H, W)` bool array.
     """),
     exercise(
         stub="""
@@ -166,8 +183,9 @@ CELLS = [
     """),
     md(r"""
     Even a *perfect* 28x28 prediction loses some detail (fingers, the gap between legs):
-    the mask head's resolution is the ceiling of Mask R-CNN's mask quality. PointRend and
-    query-based models (Mask2Former) predict at higher resolution for that reason.
+    the mask head's resolution is the ceiling of Mask R-CNN's mask quality. In the lab this
+    showed up as a boundary IoU that falls as the box grows while the mask IoU barely moves.
+    PointRend and query-based models (Mask2Former) predict at higher resolution for that reason.
 
     ### Why RoIAlign matters for masks: a round-trip experiment
 
@@ -415,6 +433,11 @@ CELLS = [
     CPU-friendly RoI counts (500 proposals for training, 200 at test time).
 
     ### Exercise 5 · replace both heads
+
+    Assign a new `FastRCNNPredictor` to `model.roi_heads.box_predictor` and a new
+    `MaskRCNNPredictor` to `model.roi_heads.mask_predictor`, both with 2 classes. Take their
+    input sizes from the old predictors printed below (`cls_score.in_features`,
+    `conv5_mask.in_channels`).
     """),
     exercise(
         stub="""
@@ -544,6 +567,9 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Read the bars in pairs (grey = COCO model, blue = fine-tuned). At AP50 both models are near
+    the ceiling, so look at the stricter mask AP75 and AP, which reward pixel-accurate masks.
+
     ### Panoptic-style quality for the *person* class
     """),
     code("""

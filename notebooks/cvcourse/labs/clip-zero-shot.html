@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLIP zero-shot geometry</title>
+<meta name="lab-notebook" content="D3-04">
+<meta name="lab-summary" content="Zero-shot classification as geometry: drag an image embedding and the text-prompt embeddings around a circle; cosine -> logit scale -> softmax, normalisation, prompt ensembling, add a class.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .under { margin-top: 8px; }
+  .readouts .readout { flex: 1 1 110px; }
+  .fig-fixed { width: 400px; max-width: 100%; }
+  .fig-bars { width: 280px; max-width: 100%; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>CLIP zero-shot geometry</h1><span class="lab-tag">D3-04 · section 3</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A toy 2-D version of CLIP's shared embedding space. The image encoder gives one vector, the text encoder one vector
+    per class prompt; the class whose text vector points most nearly the same way as the image wins. Drag the thick image vector or
+    any class vector.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig fig-fixed"><figcaption id="cap-space">embedding space</figcaption><div id="fig-space"></div></figure>
+        <figure class="lab-fig fig-bars"><figcaption id="cap-bars">classifier</figcaption><div id="fig-bars"></div></figure>
+      </div>
+      <div class="legend under" id="legend"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-main" class="lab-controls"></div>
+      <div class="btn-row" id="btns"></div>
+      <div class="readouts" id="readouts"></div>
+      <div class="formula" id="formula"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>The two best cosines are 0.998 and 0.970. Is the prediction 51% or 94% sure? Then set the scale to 10, and to 1.
+        <details><summary>why</summary><p>Probabilities come from softmax(scale · cos). With CLIP's learned scale of ~100, a cosine gap of 0.03
+          becomes a logit gap of 3, i.e. odds of e^3 = 20 : 1. Real CLIP cosines are all small (about 0.2-0.35 for matching pairs in 512-D), so
+          without the large scale every prediction would be close to uniform; the scale is learned as a temperature during contrastive training.</p></details></li>
+      <li>Press <b>add class</b> and drag the new vector between the image and the beagle. What did you retrain?
+        <details><summary>why</summary><p>Nothing. The classifier <b>is</b> the matrix of text embeddings: one row per class, computed from a sentence.
+          A new class is a new row. That is what "zero-shot" means: no image of the new class was used.</p></details></li>
+      <li>Drag the Siamese and Persian prompts together and move the image between them. What does this say about breeds?
+        <details><summary>why</summary><p>Two text vectors that point almost the same way split the probability, and a small move of the image flips the
+          prediction. Fine-grained classes whose names the text encoder embeds close together (many dog and cat breeds) are exactly where
+          zero-shot CLIP makes most of its mistakes.</p></details></li>
+      <li>Switch the features to <b>raw, no norm</b>. Which class wins, and why? Then choose <b>raw + norm</b>.
+        <details><summary>why</summary><p>Encoder outputs have different lengths. Without normalisation the dot product |img| |txt| cos θ rewards long
+          text vectors (the pug prompt is the longest) regardless of direction. L2-normalising both sides keeps only the direction, which is
+          why <code>zero_shot_classify</code> normalises first.</p></details></li>
+      <li>Turn on <b>prompt ensembling</b>, press <b>re-word the prompts</b> a few times. What moves more: hollow dot or arrow?
+        <details><summary>why</summary><p>Each wording drifts randomly around the class's true direction (dashed, known only in this toy). The average of 4
+          normalised prompts drifts about half as much (1/sqrt(4)), so the class direction is more stable and accuracy goes up: the notebook's
+          toy space gains ~10 points; real CLIP gains 1-5 because real templates make correlated errors.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const TEMPLATES = ["a photo of a {}.", "a blurry photo of a {}.", "a drawing of a {}.", "itap of a {}."];
+  const EXTRA = ["shiba inu", "Bengal cat", "great pyrenees"];
+  const COLORS = ["--c1", "--c2", "--c4", "--c5", "--c6", "--c7", "--c8"];       // categorical order, --c3 is reserved for ground truth
+  // fixed template drifts (degrees) for the default wording; "re-word" draws new ones
+  const DRIFT0 = [[6, -9, 4, -5], [-6, 8, -4, 5], [4, -6, 9, -3], [-5, 3, -8, 6]];
+  const S = Lab.params({ img: 42, imgLen: 1.2, scale: 100, feat: "unit", ens: false, seed: 0,
+    classes: "beagle@40/0.9;pug@62/1.45;Siamese cat@200/1.1;Persian cat@216/0.8" });
+  if (!["unit", "norm", "raw"].includes(S.feat)) S.feat = "unit";
+
+  let cls = [];                                         // {name, ang (concept, degrees), len (raw length), drift[4]}
+  function parseClasses(str) {
+    cls = str.split(";").map((s) => s.trim()).filter(Boolean).slice(0, 7).map((s, i) => {
+      const m = s.match(/^(.*)@(-?[\d.]+)(?:\/([\d.]+))?$/) || [null, s, String(30 * i), "1"];
+      return { name: m[1].trim(), ang: Number(m[2]), len: Lab.clamp(Number(m[3] || 1), 0.4, 1.5) };
+    });
+    redrift();
+  }
+  function gauss(rnd) { const u = Math.max(1e-9, rnd()), v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+  function redrift() {
+    cls.forEach((c, i) => {
+      if (S.seed === 0 && i < DRIFT0.length) c.drift = DRIFT0[i].slice();
+      else { const rnd = Lab.rng(1000 * S.seed + 17 * i + 3); c.drift = TEMPLATES.map(() => 9 * gauss(rnd)); }
+    });
+  }
+  parseClasses(S.classes);
+  const DEFAULTS = { img: S.img, imgLen: S.imgLen, classes: S.classes };
+
+  // ---------------------------------------------------------------- vectors and the classifier (the maths of zero_shot_classify)
+  const rad = (d) => (d * Math.PI) / 180, deg = (r) => (r * 180) / Math.PI;
+  const unit = (a) => [Math.cos(rad(a)), Math.sin(rad(a))];
+  const norm = (v) => Math.hypot(v[0], v[1]);
+  const normalize = (v) => { const n = norm(v) || 1; return [v[0] / n, v[1] / n]; };
+  const raw = () => S.feat !== "unit";
+  const imgVec = () => unit(S.img).map((x) => x * (raw() ? S.imgLen : 1));
+  const templateVecs = (c) => c.drift.map((d) => unit(c.ang + d).map((x) => x * (raw() ? c.len : 1)));
+  function textVec(c) {                               // single prompt "a photo of a {}" or the ensemble of the 4 templates
+    if (!S.ens) return templateVecs(c)[0];
+    const T = templateVecs(c).map(normalize), m = [0, 1].map((k) => T.reduce((s, t) => s + t[k], 0) / T.length);
+    return normalize(m);                              // prompt_ensemble: normalise, average, normalise again
+  }
+  function classify() {
+    const im = imgVec(), txt = cls.map(textVec), useNorm = S.feat !== "raw";
+    const a = useNorm ? normalize(im) : im, B = txt.map((t) => (useNorm ? normalize(t) : t));
+    const sims = B.map((b) => a[0] * b[0] + a[1] * b[1]);           // cosines (or raw dot products)
+    const logits = sims.map((s) => S.scale * s), mx = Math.max(...logits);
+    const ex = logits.map((l) => Math.exp(l - mx)), Z = ex.reduce((x, y) => x + y, 0), probs = ex.map((e) => e / Z);
+    const cosines = txt.map((t) => { const u = normalize(im), v = normalize(t); return u[0] * v[0] + u[1] * v[1]; });
+    const pred = probs.indexOf(Math.max(...probs));
+    return { im, txt, sims, logits, probs, cosines, pred };
+  }
+  const angOf = (v) => deg(Math.atan2(v[1], v[0]));
+  const angDiff = (a, b) => { let d = ((a - b) % 360 + 540) % 360 - 180; return d; };
+
+  // ---------------------------------------------------------------- canvases and controls
+  const W = 400, R = 124, C0 = W / 2;                 // unit circle radius in px; raw lengths up to 1.5
+  const csp = Lab.canvas("#fig-space", W, W, { framed: true });
+  const cbars = Lab.canvas("#fig-bars", 280, 4 * 56);
+  const DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));   // as in Lab.canvas
+  const toPx = (v) => [C0 + v[0] * R, C0 - v[1] * R];
+  const fromPx = (p) => [(p.x - C0) / R, (C0 - p.y) / R];
+
+  const featSeg = Lab.segmented("#c-main", { label: "features", options: [{ value: "unit", label: "unit" }, { value: "norm", label: "raw + norm" }, { value: "raw", label: "raw, no norm" }],
+    value: S.feat, onChange: (v) => { S.feat = v; redraw(); } });
+  Lab.slider("#c-main", { label: "logit scale (CLIP learns ~100)", min: 1, max: 150, step: 1, value: S.scale, fmt: (v) => `${v}  (T = ${(1 / v).toFixed(3)})`, onInput: (v) => { S.scale = v; redraw(); } });
+  const ensTog = Lab.toggle("#c-main", { label: "prompt ensembling (4 wordings per class)", value: S.ens, onChange: (v) => { S.ens = v; redraw(); } });
+  const addBtn = Lab.button("#btns", "+ add class", () => addClass(), "primary");
+  Lab.button("#btns", "re-word the prompts", () => { S.seed += 1; redrift(); redraw(); });
+  Lab.button("#btns", "reset", () => { S.img = DEFAULTS.img; S.imgLen = DEFAULTS.imgLen; S.seed = 0; parseClasses(DEFAULTS.classes); redraw(); });
+  const rPred = Lab.readout("#readouts", "prediction");
+  const rConf = Lab.readout("#readouts", "its probability");
+  const rGap = Lab.readout("#readouts", "cos gap, top 2");
+  const rLG = Lab.readout("#readouts", "logit gap (x scale)");
+
+  function addClass() {
+    if (cls.length >= 7) return;
+    let best = 0, bestD = -1;                         // the direction farthest from every existing class
+    for (let a = 0; a < 360; a += 2) { const d = Math.min(...cls.map((c) => Math.abs(angDiff(a, c.ang)))); if (d > bestD) { bestD = d; best = a; } }
+    const used = new Set(cls.map((c) => c.name)), name = EXTRA.find((n) => !used.has(n)) || `class ${cls.length + 1}`;
+    cls.push({ name, ang: best, len: 1, drift: [] }); redrift(); redraw();
+  }
+
+  // ---------------------------------------------------------------- pointer: drag the image or a class vector
+  let drag = null, hover = null;
+  function targets() {                                // draggable tips: image + each class (displayed vector tip and its point on the circle)
+    const k = classify(), out = [{ who: "img", pts: [toPx(k.im), toPx(normalize(k.im))] }];
+    cls.forEach((c, i) => out.push({ who: i, pts: [toPx(k.txt[i]), toPx(normalize(k.txt[i]))] }));
+    return out;
+  }
+  function pick(p) {
+    let best = null, bd = 16;
+    for (const t of targets()) for (const q of t.pts) { const d = Math.hypot(p.x - q[0], p.y - q[1]); if (d < bd) { bd = d; best = t.who; } }
+    return best;
+  }
+  function dragTo(p) {
+    const v = fromPx(p), a = angOf(v), L = Lab.clamp(norm(v), 0.4, 1.5);
+    if (drag === "img") { S.img = a; if (raw()) S.imgLen = L; }
+    else {
+      const c = cls[drag], shown = angOf(textVec(c));
+      c.ang += angDiff(a, shown);                     // rotate the class (its concept and all its wordings) so the arrow follows the pointer
+      if (raw() && !S.ens) c.len = L;
+    }
+    redraw();
+  }
+  Lab.pointer(csp, {
+    down(p) { drag = pick(p); if (drag !== null) dragTo(p); },
+    move(p) { if (drag !== null) dragTo(p); },
+    up() { drag = null; },
+    hover(p) { hover = pick(p); csp.canvas.style.cursor = hover !== null ? "grab" : "default"; redraw(); },
+    leave() { hover = null; redraw(); },
+  });
+
+  // ---------------------------------------------------------------- drawing
+  function arrow(g, from, to, color, width) {
+    const a = Math.atan2(to[1] - from[1], to[0] - from[0]);
+    g.save(); g.strokeStyle = color; g.fillStyle = color; g.lineWidth = width; g.lineCap = "round";
+    g.beginPath(); g.moveTo(from[0], from[1]); g.lineTo(to[0] - 7 * Math.cos(a), to[1] - 7 * Math.sin(a)); g.stroke();
+    g.beginPath(); g.moveTo(to[0], to[1]); g.lineTo(to[0] - 11 * Math.cos(a - 0.38), to[1] - 11 * Math.sin(a - 0.38)); g.lineTo(to[0] - 11 * Math.cos(a + 0.38), to[1] - 11 * Math.sin(a + 0.38)); g.closePath(); g.fill();
+    g.restore();
+  }
+  const short = (c) => c.name;
+  function label(g, str, x, y, align, o = {}) {      // text that is kept inside the canvas
+    g.save(); g.font = `${o.weight || 600} ${o.size || 11.5}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+    const tw = g.measureText(str).width; g.restore();
+    let left = align === "left" ? x : align === "right" ? x - tw : x - tw / 2;
+    left = Lab.clamp(left, 3, W - 3 - tw);
+    Lab.text(g, str, left, Lab.clamp(y, 8, W - 8), { size: o.size || 11.5, weight: o.weight || 600, color: o.color, align: "left", baseline: "middle" });
+  }
+  const side = (a) => (Math.cos(rad(a)) > 0.3 ? "left" : Math.cos(rad(a)) < -0.3 ? "right" : "center");
+  const prompt = (c) => (S.ens ? `${c.name} (mean of ${TEMPLATES.length} prompts)` : TEMPLATES[0].replace("{}", c.name));
+  const fmtArr = (vals, d, per = 4, indent = "    ") => {
+    const parts = vals.map((v) => (v >= 0 ? " " : "") + v.toFixed(d));
+    const lines = []; for (let i = 0; i < parts.length; i += per) lines.push(parts.slice(i, i + per).join(","));
+    return "[" + lines.join(",\n" + indent + " ") + "]";
+  };
+
+  function draw() {
+    const k = classify(), ink = Lab.color("--ink"), ink2 = Lab.color("--ink-2"), muted = Lab.color("--muted"), hl = Lab.color("--hl");
+    const col = (i) => Lab.color(COLORS[i % COLORS.length]);
+    const g = csp.ctx; csp.clear();
+    // axes and the unit circle
+    g.save(); g.strokeStyle = Lab.color("--grid"); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(8, C0 + 0.5); g.lineTo(W - 8, C0 + 0.5); g.moveTo(C0 + 0.5, 8); g.lineTo(C0 + 0.5, W - 8); g.stroke();
+    if (raw()) { g.setLineDash([3, 4]); g.beginPath(); g.arc(C0, C0, 1.5 * R, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]); }
+    g.strokeStyle = Lab.color("--axis"); g.lineWidth = 1.5; g.beginPath(); g.arc(C0, C0, R, 0, 2 * Math.PI); g.stroke(); g.restore();
+    // angles between the image and every class: arcs at increasing radii
+    const ia = angOf(k.im);
+    cls.forEach((c, i) => {
+      const ta = angOf(k.txt[i]), d = angDiff(ta, ia), r = R * (0.9 - 0.1 * i);
+      g.save(); g.strokeStyle = Lab.alpha(COLORS[i % COLORS.length], 0.55); g.lineWidth = 2;
+      g.beginPath(); g.arc(C0, C0, r, -rad(ia), -rad(ia + d), d > 0); g.stroke(); g.restore();
+    });
+    // ensemble extras: concept (dashed), the 4 wordings (small dots), the single prompt (hollow dot)
+    if (S.ens) cls.forEach((c, i) => {
+      const cc = col(i), cp = toPx(unit(c.ang));
+      g.save(); g.strokeStyle = cc; g.globalAlpha = 0.5; g.setLineDash([2, 4]); g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(C0, C0); g.lineTo(C0 + (cp[0] - C0) * 1.12, C0 + (cp[1] - C0) * 1.12); g.stroke(); g.restore();
+      templateVecs(c).forEach((t, j) => {
+        const q = toPx(normalize(t)); g.save(); g.fillStyle = cc;
+        if (j === 0) { g.strokeStyle = cc; g.lineWidth = 2; g.beginPath(); g.arc(q[0], q[1], 5.5, 0, 2 * Math.PI); g.fillStyle = Lab.color("--surface"); g.fill(); g.stroke(); }
+        else { g.globalAlpha = 0.75; g.beginPath(); g.arc(q[0], q[1], 3.5, 0, 2 * Math.PI); g.fill(); }
+        g.restore();
+      });
+    });
+    // class vectors
+    const ia0 = angOf(k.im);
+    const placed = [...cls.map((c, i) => ({ i, a: angOf(k.txt[i]) })), { i: "img", a: ia0 }];   // push all labels at least 11 degrees apart
+    for (let it = 0; it < 30; it++) {
+      placed.sort((x, y) => x.a - y.a);
+      for (let j = 0; j < placed.length; j++) {
+        const A = placed[j], B = placed[(j + 1) % placed.length], gap = ((B.a - A.a) % 360 + 360) % 360;
+        if (placed.length > 1 && gap < 11) { A.a -= (11 - gap) / 2; B.a += (11 - gap) / 2; }
+      }
+    }
+    cls.forEach((c, i) => {
+      const t = k.txt[i], tip = toPx(t), cc = col(i);
+      if (raw() && Math.abs(norm(t) - 1) > 1e-6) { const q = toPx(normalize(t)); g.save(); g.fillStyle = cc; g.beginPath(); g.arc(q[0], q[1], 3, 0, 2 * Math.PI); g.fill(); g.restore(); }
+      arrow(g, [C0, C0], tip, cc, hover === i || drag === i ? 4 : 2.5);
+      const la = placed.find((x) => x.i === i).a, rr = Math.max(norm(t), 1) * R + 16, lp = [C0 + rr * Math.cos(rad(la)), C0 - rr * Math.sin(rad(la))];
+      label(g, short(c), lp[0], lp[1], side(la), { color: ink });
+    });
+    // image vector on top
+    const it = toPx(k.im);
+    if (raw() && Math.abs(norm(k.im) - 1) > 1e-6) { const q = toPx(normalize(k.im)); g.save(); g.fillStyle = ink; g.beginPath(); g.arc(q[0], q[1], 3, 0, 2 * Math.PI); g.fill(); g.restore(); }
+    arrow(g, [C0, C0], it, ink, hover === "img" || drag === "img" ? 4.5 : 3);
+    g.save(); g.fillStyle = Lab.color("--surface"); g.strokeStyle = ink; g.lineWidth = 2; g.beginPath(); g.arc(it[0], it[1], 6, 0, 2 * Math.PI); g.fill(); g.stroke(); g.restore();
+    const ila = rad(placed.find((x) => x.i === "img").a), ir = Math.max(norm(k.im), 1) * R + 18;
+    label(g, "image", C0 + ir * Math.cos(ila), C0 - ir * Math.sin(ila), side(deg(ila)), { color: ink, size: 12, weight: 700 });
+    Lab.$("#cap-space").innerHTML = `embedding space <small>2-D toy (real CLIP: 512-D); arcs = angles to the image</small>`;
+
+    // classifier panel: one block per class
+    const bh = 56, x0 = 34, bw = 120, BH = Math.max(1, cls.length) * bh;
+    if (cbars.canvas.height !== Math.round(BH * DPR)) {
+      cbars.canvas.height = Math.round(BH * DPR); cbars.canvas.style.aspectRatio = `${cbars.w} / ${BH}`; cbars.ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    }
+    const gb = cbars.ctx; gb.clearRect(0, 0, cbars.w, BH);
+    const useDot = S.feat === "raw";
+    cls.forEach((c, i) => {
+      const y = i * bh, cc = col(i), win = i === k.pred, th = Math.abs(angDiff(angOf(k.txt[i]), ia));
+      gb.fillStyle = cc; gb.fillRect(0, y + 4, 10, 10);
+      Lab.text(gb, prompt(c), 16, y + 13, { size: 11.5, weight: win ? 700 : 500, color: ink });
+      Lab.text(gb, useDot ? "dot" : "cos", 16, y + 29, { size: 10.5, color: muted });
+      gb.fillStyle = Lab.color("--wash"); gb.fillRect(x0, y + 21, bw, 10);
+      const cv = Lab.clamp(useDot ? k.sims[i] / 2.25 : k.cosines[i], -1, 1);   // raw dot products range over +-1.5^2
+      gb.fillStyle = cc; gb.fillRect(cv >= 0 ? x0 + bw / 2 : x0 + bw / 2 + (cv * bw) / 2, y + 21, Math.abs(cv) * bw / 2, 10);
+      gb.fillStyle = Lab.color("--axis"); gb.fillRect(x0 + bw / 2 - 0.5, y + 19, 1, 14);
+      Lab.text(gb, `${(useDot ? k.sims[i] : k.cosines[i]).toFixed(3)}  θ ${th.toFixed(1)}°`, x0 + bw + 6, y + 29, { size: 10.5, mono: true, color: ink2 });
+      Lab.text(gb, "p", 16, y + 45, { size: 10.5, color: muted });
+      gb.fillStyle = Lab.color("--wash"); gb.fillRect(x0, y + 37, bw, 10);
+      gb.fillStyle = cc; gb.fillRect(x0, y + 37, k.probs[i] * bw, 10);
+      Lab.text(gb, `${(100 * k.probs[i]).toFixed(1)}%${win ? "  ← prediction" : ""}`, x0 + bw + 6, y + 45, { size: 10.5, mono: true, color: win ? ink : ink2, weight: win ? 700 : 400 });
+    });
+    Lab.$("#cap-bars").innerHTML = `classifier <small>p = softmax(scale · ${S.feat === "raw" ? "dot" : "cos"})</small>`;
+
+    // readouts
+    const order = k.probs.map((p, i) => i).sort((a, b) => k.sims[b] - k.sims[a]);
+    rPred.set(cls.length ? short(cls[k.pred]) : "-");
+    rConf.set(`${(100 * k.probs[k.pred]).toFixed(1)}%`);
+    rGap.el.querySelector(".k").textContent = S.feat === "raw" ? "dot gap, top 2" : "cos gap, top 2";
+    if (cls.length > 1) {
+      const gap = k.sims[order[0]] - k.sims[order[1]];
+      rGap.set(gap.toFixed(3)); rLG.set((S.scale * gap).toFixed(2));
+    }
+    addBtn.disabled = cls.length >= 7;
+
+    // formula with the current numbers
+    const f = S.feat;
+    let s = f === "raw"
+      ? `# raw features, NOT normalised\n# |img| = ${norm(k.im).toFixed(2)}\n# |txt| = ${fmtArr(k.txt.map(norm), 2, 4, "#        ")}\n`
+      : `img = normalize(image_feats)\ntxt = normalize(text_feats)\n`;
+    if (S.ens) s = `text_feats = prompt_ensemble(...)\n` + s;
+    s += `${f === "raw" ? "dot" : "cos"} = img @ txt.T\n    = ${fmtArr(k.sims, 3)}\n`;
+    s += `logits = ${S.scale} · ${f === "raw" ? "dot" : "cos"}\n    = ${fmtArr(k.logits, 1)}\n`;
+    s += `probs = softmax(logits)\n    = ${fmtArr(k.probs, 3)}\n`;
+    const esc = (t) => t.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);   // names come from params
+    s += `pred = argmax = <b>${k.pred}</b>  (${esc(short(cls[k.pred] || { name: "-" }))})`;
+    Lab.$("#formula").innerHTML = s;
+
+    const ensLeg = S.ens ? `<span>dashed: the class's true direction (toy only) · dots: its 4 wordings · hollow: "a photo of a …"</span>` : "";
+    Lab.$("#legend").innerHTML = `<span><i style="background:${ink}"></i>image embedding</span>` +
+      cls.map((c, i) => `<span><i style="background:${col(i)}"></i>${esc(c.name)}</span>`).join("") + ensLeg +
+      `<span>grey circle: length 1</span>` + (raw() ? `<span>small dots on it: the normalised vectors</span>` : "");
+  }
+  const redraw = Lab.loop(draw);
+
+  // numbers behind the current state, for the cross-check against cvcourse.day3.zero_shot_classify
+  window.labExport = () => { const k = classify(); return { feat: S.feat, ens: S.ens, scale: S.scale, img: k.im, txt: k.txt, probs: k.probs, sims: k.sims, pred: k.pred,
+    templates: cls.map(templateVecs), names: cls.map((c) => c.name) }; };
+})();
+</script>
+</body>
+</html>

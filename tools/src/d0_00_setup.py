@@ -11,6 +11,7 @@ CELLS = [
             "Tensor refresher: shapes, broadcasting, HWC vs CHW, the batch dimension",
             "Autograd in five lines",
             "A ten-line training loop on a linear model",
+            "The rhythm of every notebook (figure, lab, exercise, checker) and a check that the interactive labs work",
         ],
         topics=[
             "Confirm your machine runs every notebook of the course (CPU is enough)",
@@ -19,7 +20,7 @@ CELLS = [
             "Use broadcasting to normalise a whole batch in one line",
             "Write the forward -> loss -> zero_grad -> backward -> step loop from memory",
         ],
-        minutes=20,
+        minutes=25,
         prereq="Python and NumPy. Neural networks and backpropagation (previous class).",
     ),
     md(r"""
@@ -403,7 +404,44 @@ CELLS = [
 
     # ------------------------------------------------------------------ 6
     md(r"""
-    ## 6 · Summary
+    ## 6 · How every notebook of the course works
+
+    Each mechanism is taught in the same four beats. Knowing the rhythm lets you spend your
+    attention on the content:
+
+    | beat | what you see | what you do |
+    |---|---|---|
+    | **1 · Figure** | a generated picture of the mechanism, with the one formula that matters | read the "what to look at" sentence, find it in the picture |
+    | **2 · Lab** | an interactive panel under a `labs.show(...)` cell | answer the **Predict first** question in your head, *then* drag / slide to check, then do the "Try this" list |
+    | **3 · Exercise** | a cell with `# YOUR CODE HERE` and `raise NotImplementedError` | write the 3-15 lines that *are* the concept |
+    | **4 · Checker** | `tests.check_...` prints `[PASS]`, or `[FAIL]` with a hint | fix until it passes, then move on |
+
+    Work **cell by cell, top to bottom**. An unfinished exercise stops "Run all" at that
+    cell on purpose: later cells use your function. If you are stuck for more than five
+    minutes, open the same notebook in `notebooks/solutions/`, read that one cell, close it,
+    and type the answer yourself.
+
+    The labs are small web pages that ship with the course: no installation, no internet.
+    Run the next cell to check that they work on your machine. You should see a photo, an
+    edge map, and a 3x3 kernel you can edit. Move the pointer over the photo.
+    """),
+    code("""
+    from cvcourse import labs
+    labs.show("conv-playground")
+    """),
+    md(r"""
+    If the panel stays empty (some notebook viewers block embedded pages), open the lab in a
+    browser tab instead with `labs.open("conv-playground")`, or double-click
+    `notebooks/cvcourse/labs/index.html`, which lists every lab of the course.
+    `labs.catalog()` prints the list with the notebook each lab belongs to.
+    """),
+    code("""
+    labs.catalog();
+    """),
+
+    # ------------------------------------------------------------------ 7
+    md(r"""
+    ## 7 · Summary
 
     * Check your setup once: PyTorch + torchvision imported, data in `data/`, a device picked.
       CPU is fine for this course.

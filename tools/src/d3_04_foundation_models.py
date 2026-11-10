@@ -46,7 +46,7 @@ CELLS = [
     from matplotlib.patches import Rectangle
     import torch, torch.nn as nn, torch.nn.functional as F
     from torch.utils.data import DataLoader
-    from cvcourse import viz, tests, torchkit, day3
+    from cvcourse import viz, tests, torchkit, day3, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -99,6 +99,18 @@ CELLS = [
     axes[1].set_xticks([j * 20 + 8 for j in range(12)]); axes[1].set_xticklabels([0, 1, 2, 13, 14, 15, 90, 91, 104, 105, 194, 195], fontsize=8)
     axes[1].set_title("... a sequence of 196 tokens (patch index below), each 3*16*16 = 768 numbers -> linear -> D dims")
     plt.tight_layout(); plt.show()
+    """),
+    md(r"""
+    ### Lab · Patches and attention
+    Steps 1-2 turn the image into tokens; the first transformer layer then lets every token take a
+    weighted average over **all** tokens (self-attention; Exercise 2 writes it in five lines).
+    **Predict first:** click a patch of the dark uniform. Will the patches that get most of its
+    attention weight be its neighbours, as in a 3x3 convolution, or anywhere in the image?
+    Check, then work through the lab's "Try this" list (6 minutes). The lab's patch embeddings are
+    hand-made (colour, contrast, edges); a trained ViT's attention maps follow below.
+    """),
+    code("""
+    labs.show("patch-attention")
     """),
     md(r"""
     ### Exercise 1 · patchify, and the proof that it is a convolution
@@ -155,8 +167,12 @@ CELLS = [
 
     $$\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right) V$$
 
-    Implement it for tensors of shape `(..., N, d)`; return `(output, weights)`. Multi-head
-    attention runs $h$ of these in parallel on $D/h$-dimensional slices and concatenates.
+    Implement it for tensors of shape `(..., N, d)`; return `(output, weights)`. Shapes:
+    `q (..., Nq, d)`, `k (..., Nk, d)`, `v (..., Nk, dv)` -> `output (..., Nq, dv)` and
+    `weights (..., Nq, Nk)`, each row summing to 1 (the checker uses Nq != Nk). In the lab,
+    q = k = a hand-made patch embedding and v = the patch pixels; in a ViT all three are learned
+    linear maps of each token. Multi-head attention runs $h$ of these in parallel on
+    $D/h$-dimensional slices and concatenates.
     """),
     exercise(
         stub="""
@@ -178,7 +194,9 @@ CELLS = [
     using weights that depend only on the *relative position*: locality and translation
     equivariance are built in (an *inductive bias*). Attention mixes each token with
     **all** tokens using weights computed from the *content*: nothing is built in, so the
-    ViT must learn locality from data. Consequence (ViT paper): trained on ImageNet-1k
+    ViT must learn locality from data. It does not even know where a token is unless position
+    embeddings are added: the lab's "shuffle the patches" toggle with position strength 0 left
+    every weight unchanged. Consequence (ViT paper): trained on ImageNet-1k
     alone, ViT-B/16 reaches ~78% top-1 (below a ResNet of similar size); pre-trained on
     14M-300M images it overtakes convnets (~84-88%). DeiT later reached ~82% on ImageNet-1k
     alone with heavy augmentation and distillation.
@@ -213,7 +231,9 @@ CELLS = [
     """),
     md(r"""
     The supervised ViT's attention is noisy: it was only asked for a label, and the last
-    layer spreads attention over a few "register-like" background tokens. Rollout is
+    layer spreads attention over a few "register-like" background tokens (low-information
+    patches that large ViTs repurpose as scratch space for global information; Darcet et al.,
+    Go deeper). Rollout is
     cleaner and usually covers the animal. We will see that **self-supervised** ViTs (DINO)
     produce far crisper maps.
 
@@ -309,6 +329,11 @@ CELLS = [
         print(f"{name:34s} IoU with the pet mask (60% of attention mass): {v:.3f}")
     """),
     md(r"""
+    What the numbers mean: keep the patches that carry the top 60% of a map's attention and
+    measure their IoU with the pet (1 = exactly the pet). The supervised last layer scores
+    lowest (its attention sits on a few background tokens); rollout and, above all, the DINO
+    heads, which never saw a label, overlap the pet far better.
+
     ### DINOv2 patch features -> PCA -> colours
 
     Take the 16x16 = 256 patch features (384-D) of a few images, compute their principal
@@ -450,6 +475,9 @@ CELLS = [
     md(r"""
     ## 3 · CLIP: classification without training
 
+    k-NN and the linear probe still needed a few labelled images per breed. CLIP needs none:
+    the class names themselves become the classifier.
+
     **CLIP** (Radford et al., 2021) trains an image encoder and a text encoder together on
     400M (image, caption) pairs from the web, with a contrastive loss: in a batch of $N$
     pairs, the $N$ matching (image, text) embeddings must have a higher cosine similarity
@@ -465,11 +493,23 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    ### Lab · CLIP zero-shot geometry
+    **Predict first:** an image embedding has cosine similarity 0.998 with "a photo of a beagle"
+    and 0.970 with "a photo of a pug". With CLIP's logit scale of 100, is the prediction about
+    50%, about 75% or over 90% sure? Check in the lab (a 2-D toy of the embedding space), then
+    work through its "Try this" list (5 minutes).
+    """),
+    code("""
+    labs.show("clip-zero-shot")
+    """),
+    md(r"""
     ### Exercise 4 · `zero_shot_classify`
 
     `image_feats (N, D)` and `text_feats (C, D)` come straight out of the two encoders and
-    are **not** normalised. L2-normalise both, compute the cosine similarities, scale by
-    `logit_scale` (CLIP learns ~100) and softmax over classes. Return `(pred, probs)`.
+    are **not** normalised (the lab's "raw, no norm" setting showed what goes wrong then).
+    L2-normalise both, compute the cosine similarities, scale by `logit_scale` (CLIP learns
+    ~100) and softmax over classes. Return `(pred, probs)`: `pred (N,)` class indices and
+    `probs (N, C)`, each row summing to 1.
     """),
     exercise(
         stub="""
@@ -504,7 +544,8 @@ CELLS = [
     ### Exercise 5 · prompt ensembling
 
     `text (T, C, D)` holds the embeddings of `T` templates for `C` classes. Normalise each
-    embedding, average over the templates, normalise again -> `(C, D)`.
+    embedding, average over the templates, normalise again -> `(C, D)`. (The lab's "prompt
+    ensembling" toggle does exactly this with 4 wordings per class in 2-D.)
     """),
     exercise(
         stub="""

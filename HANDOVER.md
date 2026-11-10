@@ -33,7 +33,15 @@ fill in the "missing parts" (exercise cells) and get immediate `[PASS]`/`[FAIL]`
   scipy, matplotlib, pillow, nbformat, nbconvert, ipykernel, jupyterlab. **Not** installed:
   `transformers`, `open_clip_torch`, `onnx`, `opencv-contrib-python`,
   `segmentation-models-pytorch`, `torchmetrics` (all optional, all guarded in the notebooks).
-* No remote, no CI. One commit on `main`.
+* No remote, no CI.
+* **Interactive labs (added 2026-11-10).** 26 self-contained HTML labs in
+  `notebooks/cvcourse/labs/`, embedded in the notebooks with `labs.show("name")` (29 lab cells
+  across the 13 notebooks, each preceded by a "Predict first" question). Every number a lab
+  displays was compared against the Python reference (`cvcourse.*`, torch, torchvision) by the
+  agent that built it. Verified only in headless Chrome: `python tools/check_labs.py` passes for
+  all 26. **Not yet** opened in JupyterLab / VS Code / Colab or dragged with a real mouse (T10).
+  The same pass added "what to look at" sentences after figures, shapes and return types to
+  exercise instructions, and definitions at first use (about 100 small edits in `tools/src`).
 
 ## 3. How the pieces fit
 
@@ -54,6 +62,10 @@ notebooks/cvcourse/   shared package imported by every notebook (sys.path snippe
                                                   get_penn_fudan, ShapesDataset, detection_collate
     day1.py day2.py day3.py                       per-day models and reference solutions (MiniResNet, mini detector,
                                                   tiny RPN, FPN, U-Net, Mask R-CNN glue, ViT helpers, schematics)
+    labs/                                         interactive labs: lab.css + lab.js (shared toolkit), one <name>.html per lab,
+                                                  generated index.html, __init__.py (labs.show / open / catalog), README.md (the contract)
+tools/check_labs.py [pattern]        -> loads labs in headless Chrome / Edge, fails on script errors, screenshots to labs/_shots/ (ignored)
+tools/build_labs_index.py            -> regenerates labs/index.html from each lab's <meta> tags
 notebooks/assets/     three static fallback PNGs for D3-04 when timm / weights are missing
 quizzes/dayN.md + dayN-solutions.md
 ```
@@ -72,6 +84,13 @@ quizzes/dayN.md + dayN-solutions.md
 5. Figures are generated in the notebook; external links only under "Go deeper".
 6. The Bash tool used in the authoring sessions mangles heredocs containing apostrophes;
    write helper scripts to a file and run them instead.
+7. A mechanism with a geometry gets a lab, placed after its static figure and before the
+   exercise that implements it, introduced by a markdown cell with one **Predict first**
+   question. Labs follow `notebooks/cvcourse/labs/README.md` (one mechanism, live numbers
+   equal to the Python reference, a "Try this" list with hidden answers, colours by role,
+   no network). `docs/08-interactive-labs-brief.md` is the build brief.
+8. Do not run several notebook executions at once on a laptop: cells with a wall-clock cap
+   (`max_minutes`) train for fewer steps under load and the latency benchmarks inflate.
 
 Quick start for a continuing agent:
 
@@ -133,13 +152,33 @@ students see the whole block's figures before attempting the exercises) and appl
 Day 2/3 sources, or document "work cell by cell" in `D0-00` and the README.
 Done when: all 13 student notebooks either run end to end headlessly or the README states the cell-by-cell convention and `D0-00` shows the `[FAIL]` -> fix -> `[PASS]` loop once.
 
+**Status 2026-11-10:** resolved by documentation. `D0-00` section 6 explains the
+figure -> lab -> exercise -> checker rhythm and the cell-by-cell convention; Day 2/3 still
+stop at the first unfinished stub.
+
+### T10 · Try the labs in the real front ends (~1 h, needs a human)
+The labs were only exercised in headless Chrome with synthetic pointer events. Open `D2-01`
+and `D3-01` in JupyterLab, in VS Code and in Colab: check that each `labs.show` cell renders,
+resizes itself, follows the light / dark theme, and that dragging (boxes), painting
+(seg-metrics) and touch input work. Known cosmetic leftovers: several labs are 950-1100 px
+tall at full width (guideline was 900); label chips overlap in `hungarian-matching` and in
+random `nms-playground` scenes when boxes crowd; `pr-curve` wraps its plot under the list
+below ~980 px; `--hl` equals `--c2` (see the labs README).
+Done when: the three front ends are confirmed (or `labs.show` falls back to a link where
+embedding is blocked) and the run-of-show time budget has been tried on one real block.
+
 ### T7 · Instructor review pass of content (~half a day, instructor)
 Read each notebook top to bottom as a student. Known soft spots to look at first:
 * D1-02: on CPU at 64 px the "recipe" run scores lower than the plain run (13.2% vs 16.0%); the
   markdown explains the point is the train/val gap, but after T2 the GPU numbers should show the
   recipe winning outright. Update the text.
-* D2-02: at 128 px the 0.7 matching threshold leaves only forced matches, so the demo uses 0.5/0.3;
-  make sure the lecture text and quiz Q5 stay consistent.
+* D2-02: done 2026-11-10. The text now says 0.7 / 0.3 is the paper's rule for ~800 px images and
+  the notebook uses 0.5 / 0.3 at 128 px; quiz Q5 agrees. (At 0.7 the demo has 5 positives for
+  4 objects, two of them forced matches.)
+* D3-02: the "without skips" ablation mIoU varied between 0.42 and 0.73 across runs because the
+  training stops on a wall-clock cap; the text only claims "well below". Consider a step cap.
+* Block timings: the labs add 5-24 min per block if done in full; `docs/06` has the budget and
+  the notebook headers still state the original minutes.
 * D2-04: FCOS on Pet heads reaches only mAP@0.5 0.64 on CPU with 48 images; after T2 replace.
 * D3-03: Mask R-CNN fine-tuning barely moves AP (COCO already has "person"); the lesson is the
   false-positive drop (45 -> 7). Keep, but say it on the slide.
@@ -171,4 +210,7 @@ block, following `docs/06-instructor-run-of-show.md`. The figures are already th
 
 * Design, infrastructure, D1-01 and the shared NumPy package: main session (Claude Fable 5.1), 2026-11-04/05.
 * `torchkit.py`, `D0-00`, D1-01 training cells; Day 1 (D1-02..04); Day 2 (D2-01..04); Day 3 (D3-01..04): four Opus 5.5 agents, 2026-11-04/05, each verified by executing and inspecting every figure.
+* Interactive labs, 2026-11-10: toolkit, `conv-playground` exemplar, loader, check / index tools and
+  D0-00 integration by the main session (Claude Fable 5); the other 25 labs, their notebook
+  integration and the clarity pass by seven Opus 5.5 agents, one per notebook pair.
 * Source material licences: Chollet's DLwP notebooks (MIT, permission for DSR teaching), d2l.ai (CC BY-SA 4.0) were only read for the inventory; no text was copied.

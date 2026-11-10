@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Box encoding</title>
+<meta name="lab-notebook" content="D2-02">
+<meta name="lab-summary" content="Drag an anchor and a ground-truth box and read the regression target (tx, ty, tw, th); set predicted deltas and watch the decoded box; smooth-L1 vs L1 vs L2.">
+<meta name="lab-height" content="860">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .side { width: 260px; max-width: 100%; display: flex; flex-direction: column; gap: 10px; }
+  /* narrower pages (e.g. a notebook column): the side panel drops below the image, so lay its parts out in a row */
+  @media (max-width: 1087px) { .side { width: auto; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 10px 14px; } .side > * { width: 260px; max-width: 100%; } }
+  .under { margin-top: 10px; }
+  .formula .dim { color: var(--muted); }
+  .formula .warn { color: var(--bad); font-weight: 700; }
+  button.btn:disabled { opacity: 0.45; cursor: default; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Box encoding</h1><span class="lab-tag">D2-02 · section 3</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A positive anchor regresses a target t: the ground truth's offset in units of the anchor's size, and the log of
+    the size ratio. Drag the anchor and the ground truth to change t; move the delta sliders (or the blue dots) to change the
+    prediction d and see where it decodes to.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig" style="width: 422px; max-width: 100%">
+          <figcaption>image <small>drag a box to move it, an edge or corner to resize it</small></figcaption>
+          <div id="fig-img"></div>
+          <div class="legend under" id="legend"></div>
+          <div class="formula under" id="formula"></div>
+        </figure>
+        <div class="side">
+          <figure class="lab-fig"><figcaption>target t vs prediction d <small>drag the blue dots</small></figcaption><div id="fig-delta"></div></figure>
+          <figure class="lab-fig"><figcaption>box loss per coordinate <small>x = d - t</small></figcaption><div id="fig-loss"></div>
+            <div class="legend under" id="legend-loss"></div></figure>
+        </div>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-deltas" class="lab-controls"></div>
+      <div class="btn-row" id="c-snap"></div>
+      <div class="btn-row" id="c-scale"></div>
+      <div id="c-loss" class="lab-controls"></div>
+      <div class="readouts" id="readouts"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Make the ground truth exactly <b>twice</b> as wide as the anchor, then exactly <b>half</b> as wide (drag its right edge, read gw / aw).
+        What are tw in the two cases?
+        <details><summary>why</summary><p>log 2 = +0.693 and log 1/2 = -0.693: growing and shrinking by the same factor give targets of the same
+          size, so the regression head treats them alike. The linear code (gw - aw) / aw (grey line in the formula box) gives +1.00 and -0.50.</p></details></li>
+      <li>Before clicking <b>x2 scale both boxes</b>: which of tx, ty, tw, th will change?
+        <details><summary>answer</summary><p>None. Every pixel offset doubles, but so does the anchor size it is divided by. One regression
+          head can therefore serve 32 px and 512 px anchors with targets of the same size; with raw pixel offsets the large anchors would dominate the loss.</p></details></li>
+      <li>Click <b>snap deltas to the target</b>, then move the anchor. Where does the decoded box go?
+        <details><summary>why</summary><p>After the snap the decoded box sits exactly on the ground truth (difference 0.000 px): decode is
+          the exact inverse of encode. Move the anchor and the decoded box moves with it: deltas mean nothing without the anchor they were computed for.</p></details></li>
+      <li>Drag the <b>dw</b> slider to -2.5. Can the decoded width become zero or negative? Now tick <b>show a linear size code</b> and repeat.
+        <details><summary>why</summary><p>w = aw * exp(dw) is positive for any dw, so any number the network outputs is a valid box. The linear
+          version w = aw * (1 + dw) turns negative for dw &lt; -1: an impossible box the loss would have to prevent.</p></details></li>
+      <li>Push one prediction far off (a blue dot at 1.5 from its target). With beta = 0.11, how much larger is its L2 gradient than its smooth-L1 gradient?
+        Then raise beta to 1.
+        <details><summary>why</summary><p>Smooth-L1 is linear beyond beta (gradient 1, whatever the error); L2/2 has gradient equal to the error, 1.5 here
+          and growing. A few badly matched anchors cannot dominate the batch. Below beta the curve is quadratic, so the gradient fades
+          smoothly near the optimum instead of the constant push of L1. A larger beta widens that gentle zone.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+/* MATHS-BEGIN: pure functions, mirror cvcourse.boxes.encode_boxes / decode_boxes / smooth_l1 / box_iou (weights = 1) */
+const BE = (() => {
+  const cxcywh = (b) => { const w = b[2] - b[0], h = b[3] - b[1]; return [b[0] + w / 2, b[1] + h / 2, w, h]; };
+  const xyxy = (c) => [c[0] - c[2] / 2, c[1] - c[3] / 2, c[0] + c[2] / 2, c[1] + c[3] / 2];
+  /** (tx, ty, tw, th) of ground truth g relative to anchor a, both xyxy */
+  function encode(g, a) {
+    const G = cxcywh(g), A = cxcywh(a);
+    return [(G[0] - A[0]) / A[2], (G[1] - A[1]) / A[3], Math.log(G[2] / A[2]), Math.log(G[3] / A[3])];
+  }
+  const CLIP = Math.log(1000 / 16);                 // decode_boxes clips dw, dh at log(1000/16) like torchvision
+  function decode(d, a) {
+    const A = cxcywh(a);
+    return xyxy([A[0] + d[0] * A[2], A[1] + d[1] * A[3], A[2] * Math.exp(Math.min(d[2], CLIP)), A[3] * Math.exp(Math.min(d[3], CLIP))]);
+  }
+  function smoothL1(x, beta) { x = Math.abs(x); return x < beta ? 0.5 * x * x / beta : x - 0.5 * beta; }
+  function iou(a, b) {
+    const iw = Math.max(Math.min(a[2], b[2]) - Math.max(a[0], b[0]), 0), ih = Math.max(Math.min(a[3], b[3]) - Math.max(a[1], b[1]), 0);
+    const ar = (x) => Math.max(x[2] - x[0], 0) * Math.max(x[3] - x[1], 0);
+    const inter = iw * ih, union = ar(a) + ar(b) - inter;
+    return union > 0 ? inter / Math.max(union, 1e-12) : 0;
+  }
+  return { cxcywh, xyxy, encode, decode, smoothL1, iou };
+})();
+/* MATHS-END */
+
+(() => {
+  const W = 420, H = 260;                              // canvas units = image pixels
+  const S = Lab.params({ anchor: "130,90,226,186", gt: "156,70,276,152", dx: 0.2, dy: -0.15, dw: 0.4, dh: -0.3, beta: 0.11, linear: false });
+  const parseBox = (s, dflt) => { const b = s.split(",").map(Number); return b.length === 4 && b.every(Number.isFinite) && b[2] > b[0] && b[3] > b[1] ? b : dflt; };
+  const boxesW = { a: parseBox(S.anchor, [130, 90, 226, 186]), g: parseBox(S.gt, [156, 70, 276, 152]) };
+  const d = [S.dx, S.dy, S.dw, S.dh];
+  const DNAME = ["dx", "dy", "dw", "dh"], TNAME = ["tx", "ty", "tw", "th"], DMAX = [2, 2, 2.5, 2.5];
+
+  const cimg = Lab.canvas("#fig-img", W, H, { framed: true });
+  const cdel = Lab.canvas("#fig-delta", 260, 168);
+  const closs = Lab.canvas("#fig-loss", 260, 170);
+
+  // ---- controls
+  const sliders = d.map((v, k) => Lab.slider("#c-deltas", {
+    label: `predicted ${DNAME[k]}`, min: -DMAX[k], max: DMAX[k], step: 0.01, value: v, fmt: (x) => (x < 0 ? "−" : "+") + Math.abs(x).toFixed(3),
+    onInput: (x) => { d[k] = x; redraw(); },
+  }));
+  // the snap button sets exact values (not rounded to the slider step), so show those
+  const showD = () => sliders.forEach((s, k) => { s.set(d[k]); s.el.querySelector(".ctl-value").textContent = (d[k] < 0 ? "−" : "+") + Math.abs(d[k]).toFixed(3); });
+  Lab.button("#c-snap", "snap deltas to the target", () => { BE.encode(boxesW.g, boxesW.a).forEach((t, k) => { d[k] = t; }); showD(); redraw(); }, "primary");
+  Lab.button("#c-snap", "zero deltas", () => { d.fill(0); showD(); redraw(); });
+  function scaleBoth(f) {
+    const a = boxesW.a, g = boxesW.g;
+    const px = Math.round((Math.min(a[0], g[0]) + Math.max(a[2], g[2])) / 2), py = Math.round((Math.min(a[1], g[1]) + Math.max(a[3], g[3])) / 2);
+    const sc = (b) => [px + f * (b[0] - px), py + f * (b[1] - py), px + f * (b[2] - px), py + f * (b[3] - py)];
+    return [sc(a), sc(g)];
+  }
+  const fits = (b) => b[0] >= 0 && b[1] >= 0 && b[2] <= W && b[3] <= H && b[2] - b[0] >= 4 && b[3] - b[1] >= 4;
+  const bUp = Lab.button("#c-scale", "x2 scale both boxes", () => { const [a, g] = scaleBoth(2); if (fits(a) && fits(g)) { boxesW.a = a; boxesW.g = g; redraw(); } });
+  const bDown = Lab.button("#c-scale", "÷2", () => { const [a, g] = scaleBoth(0.5); if (fits(a) && fits(g)) { boxesW.a = a; boxesW.g = g; redraw(); } });
+  Lab.slider("#c-loss", { label: "smooth-L1 beta", min: 0.01, max: 2, step: 0.01, value: S.beta, fmt: (x) => x.toFixed(2), onInput: (x) => { S.beta = x; redraw(); } });
+  Lab.toggle("#c-loss", { label: "show a linear size code, w = aw·(1 + dw)", value: S.linear, onChange: (v) => { S.linear = v; redraw(); } });
+  const rA = Lab.readout("#readouts", "IoU(anchor, GT)"), rD = Lab.readout("#readouts", "IoU(decoded, GT)"), rL = Lab.readout("#readouts", "smooth-L1 sum");
+  showD();
+
+  // ---- pointer on the image: move / resize the anchor or the GT
+  let drag = null, top = "g";
+  function hit(p) {
+    const tol = 7;
+    for (const key of [top, top === "g" ? "a" : "g"]) {
+      const [x1, y1, x2, y2] = boxesW[key];
+      if (p.x < x1 - tol || p.x > x2 + tol || p.y < y1 - tol || p.y > y2 + tol) continue;
+      const mode = (Math.abs(p.y - y1) < tol ? "n" : Math.abs(p.y - y2) < tol ? "s" : "") + (Math.abs(p.x - x1) < tol ? "w" : Math.abs(p.x - x2) < tol ? "e" : "");
+      return { key, mode: mode || "move" };
+    }
+    return null;
+  }
+  const CURSOR = { move: "move", n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize" };
+  Lab.pointer(cimg, {
+    down(p) { const h = hit(p); if (h) { top = h.key; drag = { ...h, p0: p, o: boxesW[h.key].slice() }; } },
+    move(p) {
+      if (!drag) return;
+      const dx = Math.round(p.x - drag.p0.x), dy = Math.round(p.y - drag.p0.y), o = drag.o, b = boxesW[drag.key], MIN = 6;
+      if (drag.mode === "move") {
+        const w = o[2] - o[0], h = o[3] - o[1];
+        b[0] = Lab.clamp(o[0] + dx, 0, W - w); b[1] = Lab.clamp(o[1] + dy, 0, H - h); b[2] = b[0] + w; b[3] = b[1] + h;
+      } else {
+        if (drag.mode.includes("w")) b[0] = Lab.clamp(o[0] + dx, 0, o[2] - MIN);
+        if (drag.mode.includes("e")) b[2] = Lab.clamp(o[2] + dx, o[0] + MIN, W);
+        if (drag.mode.includes("n")) b[1] = Lab.clamp(o[1] + dy, 0, o[3] - MIN);
+        if (drag.mode.includes("s")) b[3] = Lab.clamp(o[3] + dy, o[1] + MIN, H);
+      }
+      redraw();
+    },
+    up() { drag = null; },
+    hover(p) { const h = hit(p); cimg.canvas.style.cursor = h ? CURSOR[h.mode] : "default"; },
+  });
+
+  // ---- pointer on the delta chart: drag a blue dot horizontally
+  const DX0 = 40, DX1 = 250, DROW = (k) => 22 + k * 32, TMIN = -2.5, TMAX = 2.5;
+  const dsx = (t) => DX0 + ((t - TMIN) / (TMAX - TMIN)) * (DX1 - DX0), dix = (x) => TMIN + ((x - DX0) / (DX1 - DX0)) * (TMAX - TMIN);
+  let dragRow = -1;
+  const setRow = (k, p) => { d[k] = Lab.clamp(Math.round(dix(p.x) * 100) / 100, -DMAX[k], DMAX[k]); showD(); redraw(); };
+  Lab.pointer(cdel, {
+    down(p) { const k = Math.round((p.y - 22) / 32); if (k >= 0 && k < 4 && Math.abs(p.y - DROW(k)) < 14) { dragRow = k; setRow(k, p); } },
+    move(p) { if (dragRow >= 0) setRow(dragRow, p); },
+    up() { dragRow = -1; },
+    hover(p) { const k = Math.round((p.y - 22) / 32); cdel.canvas.style.cursor = k >= 0 && k < 4 && Math.abs(p.y - DROW(k)) < 14 ? "ew-resize" : "default"; },
+  });
+
+  // ---- drawing
+  function chip(ctx, text, x, y, bg, placed, alts) {
+    ctx.save(); ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", sans-serif';
+    const w = ctx.measureText(text).width + 8, h = 16;
+    for (const [ox, oy] of [[x, y], ...(alts || [])]) {
+      const X = Lab.clamp(ox, 0, W - w), Y = Lab.clamp(oy, 0, H - h), r = [X, Y, X + w, Y + h];
+      if (placed.some((o) => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1])) continue;
+      placed.push(r);
+      ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(X, Y, w, h, 3); ctx.fill();
+      ctx.fillStyle = Lab.inkOn(Lab.rgb(bg)); ctx.textBaseline = "middle"; ctx.fillText(text, X + 4, Y + h / 2 + 0.5);
+      break;
+    }
+    ctx.restore();
+  }
+  function arrow(ctx, x0, y0, x1, y1, color) {
+    const L = Math.hypot(x1 - x0, y1 - y0); if (L < 2) return;
+    const ux = (x1 - x0) / L, uy = (y1 - y0) / L, hs = Math.min(9, L * 0.5);
+    ctx.save(); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1 - ux * hs, y1 - uy * hs); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x1 - ux * hs - uy * hs * 0.45, y1 - uy * hs + ux * hs * 0.45); ctx.lineTo(x1 - ux * hs + uy * hs * 0.45, y1 - uy * hs - ux * hs * 0.45); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  const sgn = (v, n = 3) => (v < 0 ? "−" : "+") + Math.abs(v).toFixed(n);
+  const f1 = (v) => (v < 0 ? "−" : "") + Math.abs(v).toFixed(1);
+
+  function draw() {
+    const a = boxesW.a, g = boxesW.g, t = BE.encode(g, a), dec = BE.decode(d, a);
+    const A = BE.cxcywh(a), G = BE.cxcywh(g), D = BE.cxcywh(dec);
+    const c1 = Lab.color("--c1"), c2 = Lab.color("--c2"), c3 = Lab.color("--c3"), c4 = Lab.color("--c4"), ink2 = Lab.color("--ink-2"), muted = Lab.color("--muted");
+    const linW = A[2] * (1 + d[2]), linH = A[3] * (1 + d[3]);
+
+    // image
+    const x = cimg.ctx; cimg.clear();
+    x.fillStyle = Lab.color("--wash"); x.fillRect(0, 0, W, H);
+    x.strokeStyle = Lab.color("--grid"); x.lineWidth = 1; x.beginPath();
+    for (let v = 32; v < W; v += 32) { x.moveTo(v + 0.5, 0); x.lineTo(v + 0.5, H); }
+    for (let v = 32; v < H; v += 32) { x.moveTo(0, v + 0.5); x.lineTo(W, v + 0.5); }
+    x.stroke();
+    x.fillStyle = Lab.alpha("--c3", 0.12); x.fillRect(g[0], g[1], g[2] - g[0], g[3] - g[1]);
+    if (S.linear) {
+      const ok = linW > 0 && linH > 0, cx = A[0] + d[0] * A[2], cy = A[1] + d[1] * A[3];
+      if (ok) Lab.box(x, [cx - linW / 2, cy - linH / 2, cx + linW / 2, cy + linH / 2], { color: muted, width: 1.5, dash: [2, 3] });
+    }
+    Lab.box(x, a, { color: c2, width: 2, dash: [6, 4] });
+    Lab.box(x, g, { color: c3, width: 2.5 });
+    Lab.box(x, dec, { color: c1, width: 2 });
+    arrow(x, A[0], A[1], G[0], G[1], ink2);
+    for (const [c, col] of [[A, c2], [G, c3], [D, c1]]) { x.fillStyle = col; x.beginPath(); x.arc(c[0], c[1], 4, 0, 2 * Math.PI); x.fill(); }
+    const placed = [];
+    {   // the centre shift in pixels, written beside the arrow (offset perpendicular to it); chips then avoid it
+      const vx = G[0] - A[0], vy = G[1] - A[1], len = Math.hypot(vx, vy) || 1, nx = -vy / len, ny = vx / len, side = ny > 0 ? -1 : 1;
+      const lx = (A[0] + G[0]) / 2 + side * nx * 12, ly = (A[1] + G[1]) / 2 + side * ny * 12, left = nx * side >= 0;
+      const txt = `shift (${f1(vx)}, ${f1(vy)}) px`;
+      x.save(); x.font = '600 11px system-ui, -apple-system, "Segoe UI", sans-serif'; x.textAlign = left ? "left" : "right"; x.textBaseline = "middle";
+      const tw = x.measureText(txt).width;
+      x.lineWidth = 4; x.lineJoin = "round"; x.strokeStyle = Lab.color("--surface"); x.strokeText(txt, lx, ly);   // halo keeps it legible over lines
+      x.fillStyle = Lab.color("--ink"); x.fillText(txt, lx, ly); x.restore();
+      placed.push(left ? [lx, ly - 8, lx + tw, ly + 8] : [lx - tw, ly - 8, lx, ly + 8]);
+    }
+    if (S.linear && !(linW > 0 && linH > 0)) chip(x, `linear size code: w = ${f1(linW)}, h = ${f1(linH)} px, not a box`, 4, 4, Lab.color("--bad"), placed, [[4, H - 20]]);
+    chip(x, "ground truth g", g[0] - 1, g[1] - 17, c3, placed, [[g[0] - 1, g[3] + 2], [g[2] - 90, g[1] - 17]]);
+    chip(x, "anchor a", a[0] - 1, a[3] + 2, c2, placed, [[a[0] - 1, a[1] - 17], [a[2] - 56, a[3] + 2]]);
+    chip(x, "decoded", dec[2] - 56, dec[3] + 2, c1, placed, [[dec[2] + 2, dec[1]], [dec[0] - 1, dec[1] - 17], [dec[0] - 60, dec[3] - 16], [dec[2] + 2, dec[3] - 16]]);
+
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${c2}"></i>anchor a (dashed)</span><span><i style="background:${c3}"></i>ground truth g</span>` +
+      `<span><i style="background:${c1}"></i>decoded from d</span>${S.linear ? `<span><i style="background:${muted}"></i>linear size code</span>` : ""}`;
+
+    // formulas, with the current numbers
+    const lw = G[2] / A[2] - 1, lh = G[3] / A[3] - 1;
+    Lab.$("#formula").innerHTML =
+      `tx = (gx−ax)/aw = (${f1(G[0])}−${f1(A[0])})/${f1(A[2])} = <b>${sgn(t[0])}</b>\n` +
+      `ty = (gy−ay)/ah = (${f1(G[1])}−${f1(A[1])})/${f1(A[3])} = <b>${sgn(t[1])}</b>\n` +
+      `tw = log(gw/aw)  = log(${f1(G[2])}/${f1(A[2])}) = <b>${sgn(t[2])}</b>\n` +
+      `th = log(gh/ah)  = log(${f1(G[3])}/${f1(A[3])}) = <b>${sgn(t[3])}</b>\n` +
+      `<span class="dim">linear code (gw−aw)/aw = ${sgn(lw)}, (gh−ah)/ah = ${sgn(lh)}</span>\n` +
+      `<span class="dim">decode the prediction d (centre x, y; size w, h):</span>\n` +
+      `x = ax + dx·aw = ${f1(A[0])} + (${sgn(d[0], 2)})·${f1(A[2])} = ${f1(D[0])}\n` +
+      `y = ay + dy·ah = ${f1(A[1])} + (${sgn(d[1], 2)})·${f1(A[3])} = ${f1(D[1])}\n` +
+      `w = aw·exp(dw) = ${f1(A[2])}·exp(${sgn(d[2], 2)}) = ${f1(D[2])}` + (S.linear ? `   <span class="${linW > 0 ? "dim" : "warn"}">linear: ${f1(linW)}</span>` : "") + `\n` +
+      `h = ah·exp(dh) = ${f1(A[3])}·exp(${sgn(d[3], 2)}) = ${f1(D[3])}` + (S.linear ? `   <span class="${linH > 0 ? "dim" : "warn"}">linear: ${f1(linH)}</span>` : "") + `\n` +
+      `decoded − g: max ${Math.max(...dec.map((v, i) => Math.abs(v - g[i]))).toFixed(3)} px`;
+
+    // delta chart: target (diamond) and prediction (dot) on one axis per coordinate
+    const q = cdel.ctx; cdel.clear();
+    q.strokeStyle = Lab.color("--grid"); q.lineWidth = 1; q.beginPath();
+    for (const v of [-2, -1, 1, 2]) { q.moveTo(Math.round(dsx(v)) + 0.5, 8); q.lineTo(Math.round(dsx(v)) + 0.5, 140); }
+    q.stroke();
+    q.strokeStyle = Lab.color("--axis"); q.beginPath(); q.moveTo(Math.round(dsx(0)) + 0.5, 8); q.lineTo(Math.round(dsx(0)) + 0.5, 140); q.stroke();
+    for (const v of [-2, -1, 0, 1, 2]) Lab.text(q, String(v), dsx(v), 156, { size: 11, align: "center", color: muted });
+    for (let k = 0; k < 4; k++) {
+      const y = DROW(k);
+      Lab.text(q, TNAME[k], 6, y, { size: 12, weight: 600, baseline: "middle", color: Lab.color("--ink"), mono: true });
+      q.strokeStyle = Lab.color("--axis"); q.beginPath(); q.moveTo(DX0, y + 0.5); q.lineTo(DX1, y + 0.5); q.stroke();
+      if (k >= 2) for (const [r, lab] of [[0.25, "×¼"], [0.5, "×½"], [2, "×2"], [4, "×4"]]) {   // size ratio ticks: log scale
+        const xx = dsx(Math.log(r)); q.fillStyle = muted; q.fillRect(xx - 0.5, y - 4, 1, 8);
+        Lab.text(q, lab, xx, y - 7, { size: 9.5, align: "center", color: muted });
+      }
+      const tx = dsx(Lab.clamp(t[k], TMIN, TMAX)), px = dsx(Lab.clamp(d[k], TMIN, TMAX));
+      q.strokeStyle = Lab.color("--hl"); q.lineWidth = 3; q.beginPath(); q.moveTo(tx, y); q.lineTo(px, y); q.stroke(); q.lineWidth = 1;
+      q.fillStyle = c3; q.beginPath(); q.moveTo(tx, y - 7); q.lineTo(tx + 7, y); q.lineTo(tx, y + 7); q.lineTo(tx - 7, y); q.closePath(); q.fill();
+      q.fillStyle = c1; q.strokeStyle = Lab.color("--surface"); q.lineWidth = 2; q.beginPath(); q.arc(px, y, 6, 0, 2 * Math.PI); q.fill(); q.stroke(); q.lineWidth = 1;
+    }
+
+    // loss curves and the four residuals
+    const L = closs.ctx; closs.clear();
+    const ax = Lab.axes(L, { x: 34, y: 8, w: 216, h: 128, xmin: -2, xmax: 2, ymin: 0, ymax: 2, xticks: [-2, -1, 0, 1, 2], yticks: [0, 0.5, 1, 1.5, 2], xlabel: "" });
+    L.fillStyle = Lab.alpha("--c1", 0.08); L.fillRect(ax.sx(-S.beta), 8, ax.sx(S.beta) - ax.sx(-S.beta), 128);
+    const xs = Array.from({ length: 241 }, (_, i) => -2 + i / 60);
+    ax.line(xs.map((v) => [v, Math.abs(v)]), c2, 1.5, [5, 3]);
+    ax.line(xs.map((v) => [v, 0.5 * v * v]), c4, 1.5);
+    ax.line(xs.map((v) => [v, BE.smoothL1(v, S.beta)]), c1, 2.5);
+    let loss = 0;
+    const tags = [];
+    for (let k = 0; k < 4; k++) {
+      const r = d[k] - t[k], l = BE.smoothL1(r, S.beta); loss += l;
+      const rx = Lab.clamp(r, -2, 2), ry = Math.min(2, BE.smoothL1(rx, S.beta));
+      ax.dot(rx, ry, Lab.color("--hl"), 4.5);
+      tags.push([ax.sx(rx), ax.sy(ry), TNAME[k]]);
+    }
+    const used = [];                                   // name the dots, stacking names that would collide
+    for (const [px, py, name] of tags.sort((p, q2) => p[0] - q2[0])) {
+      let y = py - 9;
+      while (used.some(([ux, uy]) => Math.abs(ux - px) < 16 && Math.abs(uy - y) < 11)) y -= 11;
+      used.push([px, y]);
+      Lab.text(L, name, px, Math.max(10, y), { size: 10.5, align: "center", weight: 600, color: Lab.color("--ink"), mono: true });
+    }
+    Lab.text(L, `beta = ${S.beta.toFixed(2)}`, ax.sx(0), 164, { size: 11, align: "center", color: muted });
+    Lab.$("#legend-loss").innerHTML = `<span><i style="background:${c1}"></i>smooth-L1</span><span><i style="background:${c2}"></i>L1 |x|</span>` +
+      `<span><i style="background:${c4}"></i>L2 x²/2</span><span><i style="background:${Lab.color("--hl")}"></i>your 4 residuals</span>`;
+
+    rA.set(BE.iou(a, g).toFixed(3)); rD.set(BE.iou(dec, g).toFixed(3)); rL.set(loss.toFixed(3));
+    const [ua, ug] = scaleBoth(2), [da, dg] = scaleBoth(0.5);
+    bUp.disabled = !(fits(ua) && fits(ug)); bDown.disabled = !(fits(da) && fits(dg));
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

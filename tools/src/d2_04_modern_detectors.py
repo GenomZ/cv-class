@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, FancyBboxPatch
 import torch, torch.nn as nn, torch.nn.functional as F
 import torchvision
-from cvcourse import viz, boxes, shapes, tests, torchkit, day2
+from cvcourse import viz, boxes, shapes, tests, torchkit, day2, labs
 
 %matplotlib inline
 plt.rcParams["figure.dpi"] = 90
@@ -60,7 +60,7 @@ CELLS = [
     | YOLOv1 | 2016 | one grid, 2 boxes per cell, one forward pass (our D2-03 mini detector) |
     | YOLOv2 / 9000 | 2017 | anchors from k-means on the dataset, BatchNorm, multi-scale training |
     | YOLOv3 | 2018 | 3 scales (FPN-like), Darknet-53, independent sigmoid classes |
-    | YOLOv4 / v5 | 2020 | CSP backbones, Mosaic augmentation, CIoU loss; v5 = PyTorch + Ultralytics tooling |
+    | YOLOv4 / v5 | 2020 | CSP backbones, Mosaic augmentation (four training images tiled into one), CIoU loss; v5 = PyTorch + Ultralytics tooling |
     | YOLOX | 2021 | **anchor-free**, **decoupled** cls / box heads, SimOTA dynamic assignment |
     | YOLOv6 / v7 | 2022 | re-parameterised blocks (train multi-branch, deploy as one conv), better assignment |
     | YOLOv8 | 2023 | anchor-free decoupled head with **Distribution Focal Loss**, task-aligned assignment |
@@ -105,7 +105,8 @@ CELLS = [
 
     DETR (Carion et al. 2020) removes every hand-designed component of the previous notebooks:
 
-    1. a CNN backbone produces a feature map; it is flattened into a sequence of tokens (+ positional encodings);
+    1. a CNN backbone produces a feature map; it is flattened into a sequence of tokens (+ positional encodings:
+       a vector added to every token that says where in the image it came from, because attention itself ignores order);
     2. a **transformer encoder** lets every location attend to every other one (global context);
     3. a **decoder** takes $N = 100$ learned **object queries**; each query attends to the image and outputs one
        prediction: class probabilities over $C + 1$ classes (incl. "no object") and a box (normalised cxcywh);
@@ -140,13 +141,16 @@ CELLS = [
     $$\mathcal{C}_{ij} = -\lambda_{\text{cls}}\,\hat p_i(c_j) + \lambda_{L1}\,\lVert \hat b_i - b_j \rVert_1 - \lambda_{\text{giou}}\,\mathrm{GIoU}(\hat b_i, b_j),
     \qquad \lambda_{\text{cls}} = 1,\ \lambda_{L1} = 5,\ \lambda_{\text{giou}} = 2,$$
 
-    and the **Hungarian algorithm** (Kuhn 1955) finds the permutation that minimises
+    where $\hat p_i(c_j)$ is the probability that prediction $i$ gives to the class $c_j$ of ground truth $j$,
+    and boxes are normalised $(c_x, c_y, w, h)$. The **Hungarian algorithm** (Kuhn 1955) finds the
+    assignment $\sigma$ (ground truth $j$ gets query $\sigma(j)$, no query used twice) that minimises
     $\sum_j \mathcal{C}_{\sigma(j) j}$ exactly in $O(N^3)$. `scipy.optimize.linear_sum_assignment` implements it
     and accepts rectangular matrices (more queries than objects).
 
     ### Exercise 1 · `hungarian_match`
 
-    Return `(query_idx, gt_idx)` for a cost matrix `(Q, G)`, numpy or torch.
+    Return `(query_idx, gt_idx)` for a cost matrix `(Q, G)`, numpy or torch: two integer arrays of
+    length `G` (one pair per ground-truth object), so that `cost[query_idx, gt_idx].sum()` is minimal.
     """),
     exercise(
         stub=r"""
@@ -200,11 +204,26 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    What to look at: greedy lets GT A take query 1, its cheapest (0.20), which leaves GT B only the
+    expensive query 3 (0.85), total 1.05. The optimum gives query 1 to B and query 2 to A: each
+    choice is slightly worse for one object, but the sum is 0.55.
+    """),
+    md(r"""
+    ### Lab · Hungarian matching
+    **Predict first:** two queries sit almost exactly on the same object. After matching, how many of
+    them are trained to predict that object, and what is the other one trained to predict?
+    Drag the boxes to check, then work through the "Try this" list under the lab (6 minutes).
+    """),
+    code("""
+    labs.show("hungarian-matching")
+    """),
+    md(r"""
     ### Exercise 2 · the DETR matching cost
 
     `detr_cost(pred_logits (Q, C+1), pred_boxes (Q, 4) cxcywh in [0, 1], gt_labels (G,), gt_boxes (G, 4) cxcywh)`
     -> `(Q, G)`. Use `softmax` for the class probabilities, `torch.cdist(..., p=1)` for the L1 term and
-    `torchvision.ops.generalized_box_iou` (needs xyxy: use `day2.box_cxcywh_to_xyxy_t`).
+    `torchvision.ops.generalized_box_iou` (needs xyxy: use `day2.box_cxcywh_to_xyxy_t`). This is the
+    matrix of the lab: rows are queries, columns are ground-truth objects.
     """),
     exercise(
         stub=r"""
@@ -234,7 +253,8 @@ CELLS = [
     distribution over `circle / square / triangle / no-object`. Every step we match them to the 3
     objects of a shapes image with your cost + Hungarian matching and apply DETR's loss: cross-entropy
     for all queries (unmatched ones -> "no object", down-weighted 0.1), L1 + GIoU for the matched ones.
-    The queries *compete*; the losers drift into "no object". That is why DETR needs no NMS.
+    The queries *compete*; the losers drift into "no object", like the dashed queries in the lab.
+    That is why DETR needs no NMS.
     """),
     code(r"""
     cost_fn = detr_cost if tests.check_detr_cost(detr_cost, verbose=False) else day2.detr_cost
@@ -409,7 +429,7 @@ CELLS = [
 
     Write `benchmark(model, sizes, repeats=3)` returning the **median** milliseconds of one forward
     pass (batch of 1, `torch.no_grad()`, one warm-up call first) for a random `3 x s x s` image at
-    each size. torchvision detectors resize internally, so set `model.transform.min_size = (s,)` and
+    each size, as a dict `{size: milliseconds}` (e.g. `{320: 241.0, 480: ...}`). torchvision detectors resize internally, so set `model.transform.min_size = (s,)` and
     `model.transform.max_size = s` before timing each size. Use `time.perf_counter()`.
     """),
     exercise(
@@ -453,6 +473,11 @@ CELLS = [
     ax.set_xlabel("input size (px)"); ax.set_ylabel("ms / image (CPU, batch 1)"); ax.legend(); ax.grid(alpha=.3)
     ax.set_title("latency grows with the number of pixels")
     plt.tight_layout(); plt.show()
+    """),
+    md(r"""
+    What to look at: from 320 to 640 px the side doubles and the pixel count grows 4x, but the measured
+    latency usually grows by less (compare each curve with the dotted line): part of the work, such as
+    the RoI head, NMS and framework overhead, does not depend on the resolution.
     """),
     md(r"""
     ### Exercise 5 · the comparison table
@@ -567,6 +592,12 @@ CELLS = [
     axes[1].set_ylabel("images"); axes[1].set_xticks(range(len(cnt)))
     axes[1].set_title("detections per image")
     plt.tight_layout(); plt.show()
+    """),
+    md(r"""
+    What to look at: the scores form two groups, many weak detections just above the 0.2 cut-off and a
+    cluster of confident ones near 0.7-0.9, with few in between. A production monitor would watch the
+    share of scores in the middle and the detections-per-image histogram: both shift when the input
+    data changes.
     """),
 
     # ------------------------------------------------------------------ 6

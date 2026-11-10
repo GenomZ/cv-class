@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, FancyBboxPatch
 import torch, torch.nn as nn, torch.nn.functional as F
 import torchvision
-from cvcourse import viz, boxes, shapes, tests, torchkit, day2
+from cvcourse import viz, boxes, shapes, tests, torchkit, day2, labs
 
 %matplotlib inline
 plt.rcParams["figure.dpi"] = 90
@@ -63,9 +63,11 @@ CELLS = [
     many**: its output is a *variable-length set* of `(box, class, score)` triples. That one
     sentence explains everything that makes detection harder than classification:
 
-    * the output size is not fixed -> we predict a fixed, large number of candidates and filter them (NMS);
-    * "where" needs a geometry -> boxes, and a way to compare boxes (IoU);
-    * "is this prediction right?" depends on a threshold -> precision / recall / AP instead of accuracy.
+    * the output size is not fixed -> we predict a fixed, large number of candidates and filter them
+      (non-maximum suppression, NMS: section 7);
+    * "where" needs a geometry -> boxes, and a way to compare boxes (intersection over union, IoU: section 2);
+    * "is this prediction right?" depends on a threshold -> precision / recall / average precision (AP, section 4)
+      instead of accuracy.
 
     Our running example is the Oxford-IIIT Pet dataset, which ships one *head* box per animal.
     """),
@@ -207,11 +209,28 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Look at three panels: *touching edges* (sharing an edge is not overlap, IoU 0), *one inside the
+    other* (the small box lies entirely inside the big one, yet IoU is only 0.18: IoU also counts
+    the area it misses) and *same centre, other shape* (perfectly centred, IoU 0.27). IoU measures
+    agreement of areas, not of positions.
+    """),
+    md(r"""
+    ### Lab · IoU playground
+    **Predict first:** two boxes of the same size overlap by half of their width. Is the IoU 0.5?
+    Drag the boxes to check, then do "Try this" items 1 and 5 under the lab (4 minutes). The presets
+    are the six cases of the figure above. Leave the GIoU / DIoU / CIoU tiles and the loss plot for
+    section 3, where we come back to this lab.
+    """),
+    code(r"""
+    labs.show("iou-playground")
+    """),
+    md(r"""
     ### Exercise 2 · pairwise IoU, vectorised
 
     `box_iou(a, b)` takes `a (N, 4)` and `b (M, 4)` in xyxy and returns the `(N, M)` matrix of
     IoUs **without Python loops**: broadcast `a[:, None, :2]` against `b[None, :, :2]`. Detectors
-    call this on thousands of anchors x tens of boxes per image, so it must be vectorised.
+    call this on thousands of *anchors* (fixed reference boxes tiled over the image, D2-02) x tens of
+    boxes per image, so it must be vectorised.
     """),
     exercise(
         stub=r"""
@@ -309,8 +328,21 @@ CELLS = [
       \mathrm{DIoU} = \mathrm{IoU} - \frac{\rho^2}{c^2}, \qquad
       \mathrm{CIoU} = \mathrm{DIoU} - \alpha v$$
 
-    where $v$ measures the aspect-ratio mismatch. All three lie in $[-1, 1]$; the losses are $1 - (\cdot)$.
+    where $v = \frac{4}{\pi^2}\left(\arctan\frac{w_G}{h_G} - \arctan\frac{w_P}{h_P}\right)^2$ measures the
+    aspect-ratio mismatch and $\alpha = \frac{v}{1 - \mathrm{IoU} + v}$ weights it (treated as a constant
+    when back-propagating). All three lie in $[-1, 1]$; the losses are $1 - (\cdot)$.
     GIoU (2019) is in DETR; DIoU / CIoU (2020) in the YOLO family.
+    """),
+    md(r"""
+    ### Lab · IoU losses
+    The same lab, now started on the *disjoint* case. The arrows on the edges of the prediction P show
+    the negative gradient of the chosen loss, i.e. where one step of gradient descent would move each edge.
+    **Predict first:** for 1 - IoU there are no arrows at all. When you switch the arrows to GIoU, will
+    the box *slide* towards the ground truth, or *stretch* towards it? And DIoU?
+    Check, then do "Try this" items 2-4 (5 minutes); the lower plot is the 1-D cut of every loss.
+    """),
+    code(r"""
+    labs.show("iou-playground", preset="disjoint", loss="iou")
     """),
     md(r"""
     ### Exercise 3 · GIoU
@@ -406,7 +438,9 @@ CELLS = [
     penalises the empty part of the enclosing box: its gradient first stretches the box towards
     the GT, then the IoU term takes over. DIoU pulls the **centre** straight at the target, CIoU
     additionally matches the aspect ratio. (We use Adam so that every loss gets the same step
-    length and only the *direction* of the gradient matters.) In practice detectors combine an IoU-family loss with L1 (DETR: L1 + GIoU).
+    length and only the *direction* of the gradient matters.) The first step of each trajectory is
+    exactly the arrow field you saw in the lab for that loss. In practice detectors combine an
+    IoU-family loss with L1 (DETR: L1 + GIoU).
     """),
 
     # ------------------------------------------------------------------ 4
@@ -468,9 +502,11 @@ CELLS = [
 
     ### Exercise 4 · precision and recall by greedy matching
 
-    `precision_recall(pred_boxes, pred_scores, gt_boxes, iou_threshold)` returns
-    `(precision, recall, tp)` arrays in score order. Use `boxes.box_iou`; mark matched GTs so they
-    cannot be used twice (setting their IoU to -1 is a neat trick).
+    `precision_recall(pred_boxes, pred_scores, gt_boxes, iou_threshold)` takes `pred_boxes (N, 4)`,
+    `pred_scores (N,)` and `gt_boxes (M, 4)` and returns `(precision, recall, tp)`: three arrays of
+    length N in score order, where `tp` is boolean and `precision[k]`, `recall[k]` describe the top
+    k + 1 predictions. Use `boxes.box_iou`; mark matched GTs so they cannot be used twice (setting
+    their IoU to -1 is a neat trick).
     """),
     exercise(
         stub=r"""
@@ -533,7 +569,18 @@ CELLS = [
 
     VOC2007 sampled $p_{\text{interp}}$ at 11 recall points, VOC2010+ integrates exactly ("all
     points"), COCO samples 101 points.
-
+    """),
+    md(r"""
+    ### Lab · PR curve and AP
+    The lab starts with the same 8 predictions and 4 objects as the figures above, already sorted by score.
+    **Predict first:** raising the score threshold from 0.3 to 0.9 removes all four false positives
+    from the reported detections. Does AP go up?
+    Move the threshold to check, then work through "Try this" (6 minutes).
+    """),
+    code(r"""
+    labs.show("pr-curve")
+    """),
+    md(r"""
     ### Exercise 5 · average precision (all points)
 
     Pad the curve with `(recall 0, precision 0)` at the start and `(recall 1, precision 0)` at the end
@@ -577,6 +624,9 @@ CELLS = [
         print(f"AP ({m:9s}) = {boxes.average_precision(P_toy, R_toy, m):.3f}")
     """),
     md(r"""
+    This figure is the lab's starting state; `boxes.average_precision` defaults to the COCO
+    101-point version, your Exercise 5 is the all-points one.
+
     ### mAP over classes, IoU thresholds and object sizes
 
     Let us evaluate a *simulated* detector on 300 shapes images: every object is found with a
@@ -667,6 +717,11 @@ CELLS = [
     ax.text(8, 5.0, "Each step removes the bottleneck of the previous one (speeds are rough, different GPUs - read the trend)",
             ha="center", fontsize=11)
     plt.show()
+    """),
+    md(r"""
+    Read the red "fixes" labels under the arrows: each names the bottleneck of the box on its left that
+    the box on its right removed. The bottom line of every box is the pay-off (47 s per image for
+    R-CNN, 0.2 s for Faster R-CNN two years later).
     """),
 
     # ------------------------------------------------------------------ 6
@@ -797,6 +852,12 @@ CELLS = [
     plt.tight_layout(); plt.show()
     print(f"proposal recall at IoU 0.5 for the head box: {(best >= 0.5).any()}  (R-CNN then ran the CNN on each proposal...)")
     """),
+    md(r"""
+    Look at the middle and right panels: the proposals know nothing about classes, most of them cover
+    grass, and only a few fit the head with IoU >= 0.5. Hundreds to thousands of proposals per image
+    are needed so that every object gets at least one good fit, and R-CNN classified each one with a
+    full CNN pass: that is where its 47 s per image went.
+    """),
 
     # ------------------------------------------------------------------ 7
     md(r"""
@@ -825,7 +886,9 @@ CELLS = [
     md(r"""
     ### Exercise 6 · greedy NMS
 
-    Return the indices of the kept boxes (highest score first). Use `boxes.box_iou`.
+    `nms(bxs, scores, iou_threshold)` takes `bxs (N, 4)` in xyxy and `scores (N,)` and returns an
+    integer array with the indices (into `bxs`) of the kept boxes, highest score first. A remaining
+    box is removed when its IoU with the kept box is $\ge$ `iou_threshold`. Use `boxes.box_iou`.
     """),
     exercise(
         stub=r"""
@@ -878,20 +941,39 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Each panel is one pass of the loop: the thick green box is the one just kept (its score is
+    written on it), the red boxes are the ones it removed, grey boxes still wait, thin green boxes
+    were kept earlier. One kept box per object: 15 candidates became 3 detections.
+    """),
+    md(r"""
     ### When greedy NMS hurts: crowds, and Soft-NMS
 
     NMS assumes *one object per neighbourhood*. Two people standing close together, or a
     cat in front of a dog, can overlap with IoU > 0.5 - and greedy NMS deletes the second
     (correct!) detection. **Soft-NMS** (Bodla et al. 2017) does not delete: it *decays* the
-    score of each overlapping box, $s_i \leftarrow s_i\, e^{-\mathrm{IoU}(M, b_i)^2/\sigma}$, so heavy
-    duplicates sink to near zero while a moderately overlapping neighbour survives with a lower
-    score. Recall goes up at no cost in precision.
-
+    score of each overlapping box, $s_i \leftarrow s_i\, e^{-\mathrm{IoU}(M, b_i)^2/\sigma}$ ($M$ = the box
+    just kept), so heavy duplicates sink to near zero while a moderately overlapping neighbour
+    survives with a lower score. Recall goes up at no cost in precision. (The original paper also
+    has a *linear* variant: $s_i \leftarrow s_i\,(1 - \mathrm{IoU})$ only when IoU $\ge$ the threshold.)
+    """),
+    md(r"""
+    ### Lab · NMS playground
+    **Predict first:** is there one IoU threshold for greedy NMS that keeps both people of a crowd
+    (their boxes overlap with IoU 0.6) *and* still removes every duplicate in an ordinary street scene?
+    Step through greedy NMS, then Soft-NMS and class-wise NMS, with the lab's "Try this" list
+    (7 minutes). The *crowd* scene holds the same four boxes as the figure after Exercise 7.
+    """),
+    code(r"""
+    labs.show("nms-playground")
+    """),
+    md(r"""
     ### Exercise 7 · Soft-NMS (Gaussian)
 
     Repeatedly pick the remaining box with the highest *current* score, record it, then decay
     the scores of the others and drop those below `score_threshold`. Return
-    `(kept indices, their scores at the time they were picked)`.
+    `(kept indices, their scores at the time they were picked)`: an integer array and a float array
+    of the same length, in the order the boxes were picked. This is the loop you stepped through in
+    the lab; its "now" column is `scores` after each step.
     """),
     exercise(
         stub=r"""
@@ -958,7 +1040,7 @@ CELLS = [
     *different classes* (person on a horse!). Detectors therefore run NMS **per class**. The
     vectorised trick used by `torchvision.ops.batched_nms`: shift every box by
     `label * (max coordinate + 1)` so that boxes of different classes can never overlap, then run
-    one ordinary NMS.
+    one ordinary NMS. (The lab's *person + horse* scene shows the same thing on a realistic layout.)
     """),
     code(r"""
     cw_boxes = np.array([[20, 20, 80, 80], [24, 22, 82, 84], [22, 18, 78, 82], [90, 30, 140, 90]], float)

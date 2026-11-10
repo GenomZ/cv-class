@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learning-rate schedule designer</title>
+<meta name="lab-notebook" content="D1-02">
+<meta name="lab-summary" content="Constant, step decay, warm-up + cosine and torch's OneCycleLR side by side; drag the cursor to read the LR at any step with the formula filled in.">
+<meta name="lab-height" content="760">
+<link rel="stylesheet" href="lab.css">
+<style>
+  #formula { margin-top: 10px; }
+  .readouts .readout { min-width: 0; flex: 1 1 100px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Learning-rate schedule designer</h1><span class="lab-tag">D1-02 · section 5</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A schedule is a function lr(step). Pick one, shape it, and drag the cursor to read the LR at any step with
+    the formula filled in. The default is the section-7 recipe run: peak 3e-3, 15 % warm-up, 10 epochs of 31 steps.</p>
+
+  <div class="lab-stage">
+    <div>
+      <figure class="lab-fig" style="max-width:562px"><figcaption id="cap">learning rate vs step</figcaption><div id="fig"></div></figure>
+      <div class="formula" id="formula"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-sched"></div>
+      <div id="c-sl" class="lab-controls"></div>
+      <div class="readouts" id="readouts"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Pick <b>one-cycle</b>. Before looking: at what LR does it start, and where does it end? Then tick the log axis.
+        <details><summary>answer</summary><p>It starts at peak / 25 (<code>div_factor=25</code>), not at 0, rises to the peak at
+          <code>pct_start</code>, and ends at peak / (25 * 10⁴) (<code>final_div_factor=1e4</code>): 4 decades below the start, invisible
+          on a linear axis. Both phases are cosine-shaped, torch's default <code>anneal_strategy="cos"</code>; Smith's original
+          one-cycle used straight lines. Torch also cycles the momentum 0.95 -> 0.85 -> 0.95 (not drawn).</p></details></li>
+      <li>With <b>warm-up + cosine</b>, drag the cursor halfway through the decay phase. What fraction of the peak is left? And at 90 % of the way?
+        <details><summary>answer</summary><p>Exactly 0.5, because cos(π/2) = 0; at 90 % only (1 + cos(0.9π)) / 2 = 2.4 %. Cosine stays near
+          the peak for a long time, then drops quickly to almost zero: long exploration, short settling.</p></details></li>
+      <li>Your run hits its time cap at 60 % of the planned epochs (6 of 10). Drag the cursor there: what was the LR with warm-up + cosine? With step decay?
+        <details><summary>answer</summary><p>About 45 % of the peak with cosine, 10 % with step decay: the low-LR phase that settles into a
+          minimum never happened. Schedules that depend on <code>total</code> must be given the number of steps you will really run.</p></details></li>
+      <li>Set the warm-up to 0 and put the cursor on step 0. What learning rate does the network get on its first step, with random weights?
+        <details><summary>why</summary><p>The full peak. Early gradients are large and noisy, BatchNorm statistics and Adam's moment estimates
+          are not settled yet; warm-up ramps the LR so the first steps cannot throw the weights somewhere bad. The (step + 1) in the
+          warm-up branch makes step 0 use lr_max / warmup instead of a wasted step at 0.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+// ---- maths (pure; checked against cvcourse.day1.warmup_cosine and torch.optim.lr_scheduler)
+const SCHED = (() => {
+  /** Exactly cvcourse.day1.warmup_cosine (lr_min = 0 is the notebook's exercise). */
+  function warmupCosine(step, total, warmup, lrMax, lrMin = 0) {
+    if (step < warmup) return lrMax * (step + 1) / warmup;
+    const progress = Math.min(1, (step - warmup) / Math.max(1, total - warmup));
+    return lrMin + 0.5 * (lrMax - lrMin) * (1 + Math.cos(Math.PI * progress));
+  }
+  /** torch MultiStepLR: lr * gamma ** (number of milestones <= step) */
+  function multiStep(step, milestones, gamma, lr) { return lr * gamma ** milestones.filter((m) => m <= step).length; }
+  /** torch OneCycleLR(max_lr, total_steps, pct_start, anneal_strategy="cos", div_factor, final_div_factor, three_phase=False).
+   *  Returns {lr, phase, pct, start, end, from, to} so the formula can be shown. */
+  function oneCycle(step, total, pctStart, maxLr, div = 25, finalDiv = 1e4) {
+    const initial = maxLr / div, min = initial / finalDiv;
+    const phases = [{ end: pctStart * total - 1, from: initial, to: maxLr }, { end: total - 1, from: maxLr, to: min }];
+    let start = 0;
+    for (let i = 0; i < phases.length; i++) {
+      const P = phases[i];
+      if (step <= P.end || i === phases.length - 1) {
+        const pct = P.end === start ? 1 : (step - start) / (P.end - start);   // torch divides by zero here; we take the phase end
+        return { lr: P.to + (P.from - P.to) / 2 * (Math.cos(Math.PI * pct) + 1), phase: i, pct, start, end: P.end, from: P.from, to: P.to };
+      }
+      start = P.end;
+    }
+  }
+  /** The four schedules of the lab. cfg: {peak, warmFrac, epochs, spe, finalFrac} */
+  function make(cfg) {
+    const T = cfg.epochs * cfg.spe;
+    const warmup = Math.max(1, Math.floor(cfg.warmFrac * T));              // as day1.train_recipe
+    const milestones = [Math.round(T / 2), Math.round((T * 3) / 4)];      // x0.1 at 50 % and 75 % of the run
+    const finalDiv = cfg.finalFrac > 0 ? 1 / (25 * cfg.finalFrac) : 1e4;
+    return {
+      T, warmup, milestones, finalDiv,
+      constant: (s) => cfg.peak,
+      step: (s) => multiStep(s, milestones, 0.1, cfg.peak),
+      cosine: (s) => warmupCosine(s, T, warmup, cfg.peak, cfg.finalFrac * cfg.peak),
+      onecycle: (s) => oneCycle(s, T, cfg.warmFrac, cfg.peak, 25, finalDiv).lr,
+    };
+  }
+  return { warmupCosine, multiStep, oneCycle, make };
+})();
+// ---- end maths
+
+(() => {
+  const NAMES = { constant: "constant", step: "step decay", cosine: "warm-up + cosine", onecycle: "one-cycle" };
+  const COLORS = { constant: "--c1", step: "--c2", cosine: "--c4", onecycle: "--c5" };
+  const S = Lab.params({ schedule: "cosine", peak: 0.003, warmup: 0.15, epochs: 10, spe: 31, final: 0, step: 100, log: false });
+  if (!NAMES[S.schedule]) S.schedule = "cosine";
+  S.spe = Math.max(1, Math.round(S.spe));
+
+  const CW = 560, CH = 260;
+  const c = Lab.canvas("#fig", CW, CH);
+  let ax = null;
+
+  Lab.segmented("#c-sched", { label: "schedule", options: Object.entries(NAMES).map(([value, label]) => ({ value, label })), value: S.schedule,
+    onChange: (v) => { S.schedule = v; redraw(); } });
+  const lpk = (v) => +(10 ** v).toPrecision(2);
+  Lab.slider("#c-sl", { label: "peak LR (log scale)", min: -4, max: 0, step: 0.005, value: Math.log10(S.peak), fmt: (v) => String(lpk(v)),
+    onInput: (v) => { S.peak = lpk(v); redraw(); } });
+  Lab.slider("#c-sl", { label: "warm-up fraction (pct_start)", min: 0, max: 0.5, step: 0.01, value: S.warmup, fmt: (v) => `${Math.round(v * 100)} %`,
+    onInput: (v) => { S.warmup = v; redraw(); } });
+  Lab.slider("#c-sl", { label: "total epochs", min: 1, max: 100, step: 1, value: S.epochs, onInput: (v) => { S.epochs = v; redraw(); } });
+  Lab.slider("#c-sl", { label: "final LR / peak (cosine, one-cycle)", min: 0, max: 0.2, step: 0.005, value: S.final, fmt: (v) => v.toFixed(3),
+    onInput: (v) => { S.final = v; redraw(); } });
+  Lab.toggle("#c-sl", { label: "log y-axis", value: S.log, onChange: (v) => { S.log = v; redraw(); } });
+  const rStep = Lab.readout("#readouts", "step (epoch)");
+  const rLr = Lab.readout("#readouts", "learning rate");
+  const rRel = Lab.readout("#readouts", "lr / peak");
+
+  const pick = (p) => { if (!ax) return; S.step = Math.round(ax.ix(p.x)); redraw(); };
+  Lab.pointer(c, { down: pick, move: pick });
+
+  const f4 = (v) => (v === 0 ? "0" : Math.abs(v) < 1e-3 ? v.toExponential(2) : String(+v.toPrecision(4)));
+  const onePlus = (c) => `(1 ${c < 0 ? "-" : "+"} ${Math.abs(c).toFixed(3)})`;      // (1 + cos(...)) with the sign written out
+
+  function draw() {
+    const cfg = { peak: S.peak, warmFrac: S.warmup, epochs: S.epochs, spe: S.spe, finalFrac: S.final };
+    const K = SCHED.make(cfg), T = K.T;
+    S.step = Lab.clamp(S.step, 0, T - 1);
+    const g = c.ctx; c.clear();
+    const lo = -9;                                                     // log axis floor: 1e-9 * peak
+    const yv = (lr) => (S.log ? Math.max(lo, Math.log10(Math.max(lr, 1e-300) / S.peak)) : lr / S.peak);
+    const epT = [1, 2, 5, 10, 20, 25, 50].find((e) => S.epochs / e <= 10) || 50;
+    const xticks = []; for (let e = 0; e <= S.epochs; e += epT) xticks.push(e * S.spe);
+    ax = Lab.axes(g, {
+      x: 52, y: 10, w: CW - 64, h: CH - 50, xmin: 0, xmax: T, ymin: S.log ? lo : 0, ymax: S.log ? 0.3 : 1.08,
+      xticks, xfmt: (v) => String(Math.round(v / S.spe)), xlabel: `epoch (${S.spe} steps each, ${T} steps in total)`,
+      yticks: S.log ? [-9, -8, -7, -6, -5, -4, -3, -2, -1, 0] : [0, 0.25, 0.5, 0.75, 1],
+      yfmt: (v) => (S.log ? (v === 0 ? "peak" : `1e${v}`) : v === 1 ? "peak" : `${v}`),
+      ylabel: S.log ? "lr / peak (log)" : "lr / peak",
+    });
+    // shaded warm-up for the two schedules that have one
+    if (S.schedule === "cosine" || S.schedule === "onecycle") {
+      const wEnd = S.schedule === "cosine" ? K.warmup : S.warmup * T;
+      g.fillStyle = Lab.color("--wash"); g.fillRect(ax.sx(0), 10, ax.sx(wEnd) - ax.sx(0), CH - 50);
+      if (ax.sx(wEnd) - ax.sx(0) > 40) Lab.text(g, "warm-up", (ax.sx(0) + ax.sx(wEnd)) / 2, 24, { align: "center", size: 11, color: Lab.color("--muted") });
+    }
+    if (S.schedule === "step") {
+      g.save(); g.setLineDash([3, 3]); g.strokeStyle = Lab.color("--axis");
+      for (const m of K.milestones) { g.beginPath(); g.moveTo(ax.sx(m), 10); g.lineTo(ax.sx(m), CH - 40); g.stroke(); }
+      g.restore();
+    }
+    const n = Math.min(T, 1500), pts = (fn) => Array.from({ length: n + 1 }, (_, i) => { const s = Math.min(T - 1, Math.round((i * (T - 1)) / n)); return [s, yv(fn(s))]; });
+    for (const k of Object.keys(NAMES)) if (k !== S.schedule) ax.line(pts(K[k]), Lab.alpha(COLORS[k], 0.45), 1.5);
+    ax.line(pts(K[S.schedule]), Lab.color(COLORS[S.schedule]), 2.5);
+    // cursor
+    const s = S.step, lr = K[S.schedule](s);
+    g.save(); g.strokeStyle = Lab.color("--ink"); g.lineWidth = 1; g.setLineDash([4, 3]);
+    g.beginPath(); g.moveTo(Math.round(ax.sx(s)) + 0.5, 10); g.lineTo(Math.round(ax.sx(s)) + 0.5, CH - 40); g.stroke(); g.restore();
+    ax.dot(s, yv(lr), Lab.color(COLORS[S.schedule]), 5);
+    const lbl = `step ${s}`, lx = ax.sx(s) + (ax.sx(s) > CW - 90 ? -6 : 6);
+    Lab.text(g, lbl, lx, 22, { size: 11.5, weight: 600, color: Lab.color("--ink"), align: ax.sx(s) > CW - 90 ? "right" : "left" });
+    Lab.$("#cap").innerHTML = `learning rate vs step <small>drag anywhere on the chart to move the cursor; faint lines: the other schedules</small>`;
+
+    // formula, filled in
+    let F;
+    if (S.schedule === "constant") F = `lr(step) = lr_max = <b>${f4(lr)}</b>\n(no warm-up, no decay)`;
+    else if (S.schedule === "step") {
+      const k = K.milestones.filter((m) => m <= s).length;
+      F = `MultiStepLR(milestones=[${K.milestones.join(", ")}], gamma=0.1)\n` +
+        `lr = lr_max * 0.1^(number of milestones <= step)\n   = ${f4(S.peak)} * 0.1^${k} = <b>${f4(lr)}</b>`;
+    } else if (S.schedule === "cosine") {
+      const W = K.warmup, lmin = S.final * S.peak;
+      F = `warmup_cosine(step=${s}, total=${T}, warmup=${W}, lr_max=${f4(S.peak)}${S.final ? `, lr_min=${f4(lmin)}` : ""})\n`;
+      if (s < W) F += `step < warmup:  lr = lr_max * (step + 1) / warmup\n                 = ${f4(S.peak)} * ${s + 1} / ${W} = <b>${f4(lr)}</b>`;
+      else {
+        const pr = Math.min(1, (s - W) / Math.max(1, T - W));
+        F += `progress = (step - warmup) / (total - warmup) = ${s - W} / ${T - W} = ${pr.toFixed(3)}\n` +
+          `lr = lr_min + 0.5 * (lr_max - lr_min) * (1 + cos(π * progress))\n` +
+          `   = ${f4(lmin)} + 0.5 * ${f4(S.peak - lmin)} * ${onePlus(Math.cos(Math.PI * pr))} = <b>${f4(lr)}</b>`;
+      }
+    } else {
+      const R = SCHED.oneCycle(s, T, S.warmup, S.peak, 25, K.finalDiv);
+      F = `OneCycleLR(max_lr=${f4(S.peak)}, total_steps=${T}, pct_start=${S.warmup},\n           div_factor=25, final_div_factor=${f4(K.finalDiv)})\n` +
+        `phase ${R.phase + 1} of 2, steps ${R.start.toFixed(1)} .. ${R.end.toFixed(1)}: ` +
+        (R.phase ? `start = max_lr = ${f4(R.from)}, end = min_lr = ${f4(R.to)}\n` : `start = initial_lr = ${f4(R.from)}, end = max_lr = ${f4(R.to)}\n`) +
+        `pct = (${s} - ${R.start.toFixed(1)}) / (${R.end.toFixed(1)} - ${R.start.toFixed(1)}) = ${R.pct.toFixed(3)}\n` +
+        `lr = end + (start - end) / 2 * (1 + cos(π * pct))\n   = ${f4(R.to)} + (${f4(R.from)} - ${f4(R.to)}) / 2 * ${onePlus(Math.cos(Math.PI * R.pct))} = <b>${f4(lr)}</b>`;
+    }
+    Lab.$("#formula").innerHTML = F;
+    rStep.set(`${s} (${(s / S.spe).toFixed(1)})`); rLr.set(f4(lr)); rRel.set((lr / S.peak).toFixed(3));
+    Lab.$("#legend").innerHTML = Object.keys(NAMES).map((k) => `<span><i style="background:${Lab.color(COLORS[k])}"></i>${NAMES[k]}</span>`).join("");
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

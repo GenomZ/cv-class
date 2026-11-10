@@ -2,8 +2,8 @@
 
 A refreshed, PyTorch-based version of the DSR "Deep Learning for Computer Vision
 Fundamentals" and "Advanced Computer Vision" courses. Three days, eight hours each,
-most of it hands-on in notebooks that explain every mechanism with generated figures
-and leave the key lines for students to write.
+most of it hands-on in notebooks that explain every mechanism with generated figures,
+let students play with it in an interactive lab, and leave the key lines for them to write.
 
 | Day | Theme | Notebooks |
 |---|---|---|
@@ -19,7 +19,8 @@ and leave the key lines for students to write.
 docs/        course design: topic inventory of the old repos, 3-day syllabus, refresh map, notebook specs
 notebooks/   student notebooks (D1-01 ... D3-04) and notebooks/solutions/
 notebooks/cvcourse/   shared helpers: NumPy reference implementations, checkers, synthetic data, PyTorch utilities
-tools/       notebook sources (tools/src/*.py) and the build / run scripts
+notebooks/cvcourse/labs/   26 interactive labs (plain HTML + JS, offline); open index.html to browse them
+tools/       notebook sources (tools/src/*.py) and the build / run / lab-check scripts
 quizzes/     end-of-day multiple-choice quizzes with solutions
 data/        datasets and checkpoints (not committed; see setup)
 ```
@@ -45,6 +46,30 @@ python tools/run_notebooks.py D1-01      # executes the solution notebook(s) hea
 
 Exercise cells are stubs in the student notebooks and complete in the solutions; every
 exercise has a `tests.check_*` cell that prints `[PASS]` / `[FAIL]` with a hint.
+
+## Interactive labs
+
+Every mechanism that has a geometry (a kernel sliding, two boxes overlapping, anchors being
+matched, a mask being pasted) has a lab: a small web page where students drag, paint and
+slide, and the numbers update with the notebook's formula filled in. Each lab opens with a
+"Predict first" question in the notebook and ends with a "Try this" list whose answers are
+hidden until clicked.
+
+| Day | Labs |
+|---|---|
+| 1 | convolution playground · receptive field · Mixup / CutMix · optimizer playground · LR schedule · block cost · gradient flow · freeze / unfreeze · Grad-CAM by hand |
+| 2 | IoU playground · PR curve and AP · NMS · anchor matching · box encoding · RoI pooling vs RoIAlign · grid assignment · FPN levels · focal loss · Hungarian matching |
+| 3 | segmentation metrics · transposed convolution · U-Net shapes · sliding window · mask paste-back · patches and attention · CLIP zero-shot |
+
+```python
+from cvcourse import labs
+labs.show("iou-playground")     # embedded under the notebook cell
+labs.open("index")              # all labs in a browser tab (good for the projector)
+```
+
+They need no packages and no network. To add or change one, read
+`notebooks/cvcourse/labs/README.md`; `python tools/check_labs.py` smoke-tests all of them in
+headless Chrome / Edge and `python tools/build_labs_index.py` regenerates the index.
 
 ## Sources
 

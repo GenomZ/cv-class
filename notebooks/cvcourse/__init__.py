@@ -11,8 +11,9 @@ boxes    : box formats, IoU family, NMS, anchors, matching, encoding, AP
 seg      : segmentation metrics and losses (Dice, IoU), upsampling references
 shapes   : synthetic "shapes" dataset with boxes and masks (no download)
 tests    : checkers for the exercises (`tests.check_iou(my_iou)` etc.)
+labs     : interactive browser labs embedded in the notebooks (`labs.show("conv-playground")`)
 """
 
-from . import viz, convops, boxes, seg, shapes, tests  # noqa: F401
+from . import viz, convops, boxes, seg, shapes, tests, labs  # noqa: F401
 
-__all__ = ["viz", "convops", "boxes", "seg", "shapes", "tests"]
+__all__ = ["viz", "convops", "boxes", "seg", "shapes", "tests", "labs"]

@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoI pooling vs RoIAlign</title>
+<meta name="lab-notebook" content="D2-02">
+<meta name="lab-summary" content="Drag a region of interest over an 8x8 feature map: RoI pooling rounds the box and its bins, RoIAlign samples bilinearly at exact positions. Hover a sample to see its 4 neighbours and weights.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .formula .dim { color: var(--muted); }
+  .under { margin-top: 6px; }
+  .w-map { width: 242px; max-width: 100%; }  /* figure as wide as its canvas, so long captions wrap instead of pushing the maps apart */
+  .w-out { width: 360px; max-width: 100%; }
+  .w-sweep { width: 240px; max-width: 100%; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>RoI pooling vs RoIAlign</h1><span class="lab-tag">D2-02 · section 5</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">One proposal (blue), one feature map, two ways to cut out a fixed-size tile. Drag or resize the box on either
+    map, hover a bin or a sample point, and nudge the box by a tenth of a cell.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig w-map"><figcaption>RoI pooling <small>Fast R-CNN: round the box, integer bins, max</small></figcaption><div id="fig-pool"></div></figure>
+        <figure class="lab-fig w-map"><figcaption>RoIAlign <small>Mask R-CNN: exact bins, bilinear samples, mean</small></figcaption><div id="fig-align"></div></figure>
+        <figure class="lab-fig w-out"><figcaption id="cap-out">outputs</figcaption><div id="fig-out"></div></figure>
+        <figure class="lab-fig w-sweep"><figcaption id="cap-sweep">sweep</figcaption><div id="fig-sweep"></div></figure>
+      </div>
+      <div class="legend under" id="legend"></div>
+      <div class="formula under" id="mis"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-main" class="lab-controls"></div>
+      <div class="btn-row" id="c-nudge"></div>
+      <div class="formula" id="calc"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Click <b>0.1 cell &#9654;</b> five times. In the centre bin, which output follows the box and which jumps?
+        <details><summary>why</summary><p>RoI pooling only sees the rounded box: until an edge crosses a half cell it reads the same cells, then a
+          whole column changes at once (the orange staircase in the sweep plot). RoIAlign's samples move with the box and their bilinear weights change
+          continuously (blue curve). A staircase has zero gradient almost everywhere: box and mask heads train better on RoIAlign.</p></details></li>
+      <li>Switch the stride from 16 to 32. How many image pixels can RoI pooling's input be off?
+        <details><summary>why</summary><p>Rounding moves each box edge by up to half a cell, and the integer bins add up to another cell: with the
+          default box 13 px and 32 px at stride 32. Tolerable for "is this a person?", not for a 28 x 28 mask that must follow the outline.
+          RoIAlign never rounds, at any stride.</p></details></li>
+      <li>Choose <b>7x7</b>. How many cells does a RoI pooling bin read when the box is only ~5 x 4 cells?
+        <details><summary>answer</summary><p>Bins smaller than a cell still read whole cells (1 or 2 per side), so neighbouring bins read the same
+          cells (the box under the outputs counts them) and copy the same maximum: the 7x7 output is blocky. RoIAlign gives every bin its own sample positions.</p></details></li>
+      <li>Pick <b>single peak</b>. How many pooled outputs show 9.0? How close does RoIAlign get?
+        <details><summary>why</summary><p>Four of the nine pooled outputs are 9.0: max pooling copies the peak at full height into every bin that
+          touches its cell. RoIAlign's largest output is about 4: it averages interpolated values, so the peak is shared out smoothly and fades with distance.</p></details></li>
+      <li>Set sampling ratio <b>1</b> and hover a sample. When does a sample return exactly one cell's value?
+        <details><summary>answer</summary><p>Only on a cell centre, where one weight is 1. Elsewhere it blends four cells with weights
+          (1-ly)(1-lx), (1-ly)lx, ly(1-lx), ly lx, which sum to 1. More samples per bin (2 x 2 by default) cover more of the bin.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+/* MATHS-BEGIN: pure functions. roiAlign = torchvision.ops.roi_align(aligned=True) (as the notebook exercise);
+   roiPool(plus1=false) = cvcourse.day2.roi_pool_quantized, roiPool(plus1=true) = torchvision.ops.roi_pool. */
+const RA = (() => {
+  const pyRound = (v) => { const f = Math.floor(v), r = v - f; return r > 0.5 ? f + 1 : r < 0.5 ? f : (f % 2 === 0 ? f : f + 1); };  // Python round()
+  const cRound = (v) => (v < 0 ? -Math.floor(-v + 0.5) : Math.floor(v + 0.5));                                                       // C++ round()
+  /** Bilinear value at index coordinates (y, x) (cell centres at integers), torchvision's border rules. */
+  function bilinear(F, H, W, y, x) {
+    if (y < -1 || y > H || x < -1 || x > W) return { v: 0, nb: [] };
+    if (y <= 0) y = 0;
+    if (x <= 0) x = 0;
+    let yl = Math.floor(y), xl = Math.floor(x), yh, xh;
+    if (yl >= H - 1) { yh = yl = H - 1; y = yl; } else yh = yl + 1;
+    if (xl >= W - 1) { xh = xl = W - 1; x = xl; } else xh = xl + 1;
+    const ly = y - yl, lx = x - xl, hy = 1 - ly, hx = 1 - lx;
+    const nb = [[yl, xl, hy * hx], [yl, xh, hy * lx], [yh, xl, ly * hx], [yh, xh, ly * lx]];
+    return { v: nb.reduce((s, [r, c, w]) => s + w * F[r * W + c], 0), nb, ly, lx };
+  }
+  /** roi = [x1, y1, x2, y2] in feature cells (cell j spans [j, j+1)); spatial_scale 1. */
+  function roiAlign(F, H, W, roi, P, sr) {
+    const x1 = roi[0] - 0.5, y1 = roi[1] - 0.5, x2 = roi[2] - 0.5, y2 = roi[3] - 0.5;   // aligned=True: shift to cell-centre indices
+    const bw = (x2 - x1) / P, bh = (y2 - y1) / P, out = new Float64Array(P * P), samples = [];
+    for (let i = 0; i < P; i++) for (let j = 0; j < P; j++) {
+      let sum = 0; const list = [];
+      for (let iy = 0; iy < sr; iy++) for (let ix = 0; ix < sr; ix++) {
+        const y = y1 + i * bh + ((iy + 0.5) * bh) / sr, x = x1 + j * bw + ((ix + 0.5) * bw) / sr;
+        const s = bilinear(F, H, W, y, x); sum += s.v; list.push({ y, x, ...s });
+      }
+      out[i * P + j] = sum / (sr * sr); samples.push(list);
+    }
+    return { out, samples, bw, bh };
+  }
+  /** Returns pooled values, the integer bins [xa, ya, xb, yb) (cells), each bin's argmax cell and the snapped box. */
+  function roiPool(F, H, W, roi, P, plus1) {
+    const out = new Float64Array(P * P), bins = [], arg = [];
+    let snapped;
+    const take = (xa, ya, xb, yb) => {
+      let best = -Infinity, at = null;
+      for (let r = ya; r < yb; r++) for (let c = xa; c < xb; c++) if (F[r * W + c] > best) { best = F[r * W + c]; at = [r, c]; }
+      return at ? [best, at] : [0, null];               // torchvision: an empty bin gives 0
+    };
+    if (!plus1) {
+      let x1 = pyRound(roi[0]), y1 = pyRound(roi[1]), x2 = pyRound(roi[2]), y2 = pyRound(roi[3]);
+      x2 = Math.max(x2, x1 + 1); y2 = Math.max(y2, y1 + 1); snapped = [x1, y1, x2, y2];
+      for (let i = 0; i < P; i++) for (let j = 0; j < P; j++) {
+        const ya = y1 + Math.floor((i * (y2 - y1)) / P), yb = y1 + Math.ceil(((i + 1) * (y2 - y1)) / P);
+        const xa = x1 + Math.floor((j * (x2 - x1)) / P), xb = x1 + Math.ceil(((j + 1) * (x2 - x1)) / P);
+        const [v, at] = take(xa, ya, xb, yb); out[i * P + j] = v; bins.push([xa, ya, xb, yb]); arg.push(at);
+      }
+    } else {                                            // float32 like the C++ kernel; width = end - start + 1
+      const f = Math.fround;
+      const sw = cRound(f(roi[0])), sh = cRound(f(roi[1])), ew = cRound(f(roi[2])), eh = cRound(f(roi[3]));
+      const rw = Math.max(ew - sw + 1, 1), rh = Math.max(eh - sh + 1, 1), bsw = f(rw / P), bsh = f(rh / P);
+      snapped = [sw, sh, Math.min(sw + rw, W), Math.min(sh + rh, H)];
+      const cl = (v, hi) => Math.min(Math.max(v, 0), hi);
+      for (let i = 0; i < P; i++) for (let j = 0; j < P; j++) {
+        const ya = cl(Math.floor(f(i * bsh)) + sh, H), yb = cl(Math.ceil(f((i + 1) * bsh)) + sh, H);
+        const xa = cl(Math.floor(f(j * bsw)) + sw, W), xb = cl(Math.ceil(f((j + 1) * bsw)) + sw, W);
+        const [v, at] = yb <= ya || xb <= xa ? [0, null] : take(xa, ya, xb, yb);
+        out[i * P + j] = v; bins.push([xa, ya, xb, yb]); arg.push(at);
+      }
+    }
+    return { out, bins, arg, snapped };
+  }
+  return { pyRound, cRound, bilinear, roiAlign, roiPool };
+})();
+/* MATHS-END */
+
+(() => {
+  const N = 8, CELL = 30, M = N * CELL;                 // 8 x 8 feature map drawn at 30 px per cell
+  const FIELDS = {
+    "smooth bumps": { d: 1, v: [1.0,1.1,1.3,1.8,2.6,3.2,3.1,2.3,1.3,1.4,1.8,2.8,4.5,5.7,5.3,3.8,1.6,1.7,2.3,3.6,5.8,7.4,6.9,4.8,2.0,2.3,2.8,3.9,5.6,7.0,6.5,4.7,
+                                     2.7,3.5,4.0,4.2,4.7,5.2,4.9,3.8,3.5,4.9,5.5,4.8,3.9,3.6,3.4,3.0,3.8,5.3,5.8,4.8,3.6,3.0,2.8,2.7,3.5,4.4,4.7,4.1,3.3,2.9,2.8,2.8] },
+    "single peak": { d: 0, v: Array.from({ length: 64 }, (_, k) => ({ 20: 4, 27: 4, 28: 9, 29: 3, 36: 3 })[k] || 1) },
+    "notebook figure": { d: 2, v: [0.64,1.27,2.04,3.02,4.81,0.91,1.61,2.73,1.54,2.94,3.82,4.00,0.86,1.03,2.73,3.18,2.86,3.54,4.30,0.42,1.03,2.12,3.67,4.65,
+                                   3.62,4.38,1.00,1.98,2.69,3.65,4.69,0.39,4.14,0.72,1.53,2.31,3.49,4.89,0.93,1.36,0.57,1.32,2.59,3.34,4.39,0.89,1.23,2.62,
+                                   1.08,2.83,3.79,4.24,0.88,1.06,2.34,3.15,2.45,3.80,4.23,0.05,1.40,2.20,3.09,4.58] },
+    "random": { d: 1, v: (() => { const r = Lab.rng(7); return Array.from({ length: 64 }, () => Math.round(r() * 90) / 10); })() },
+  };
+  const S = Lab.params({ field: "smooth bumps", out: 3, sr: 2, stride: 16, plus1: false, roi: "1.3,1.7,6.1,5.6", bi: -1, bj: -1, si: 0, sj: 0 });
+  if (!FIELDS[S.field]) S.field = "smooth bumps";
+  if (![2, 3, 4, 7].includes(S.out)) S.out = 3;
+  if (![1, 2, 4].includes(S.sr)) S.sr = 2;
+  let r0 = S.roi.split(",").map(Number);
+  if (r0.length !== 4 || !r0.every(Number.isFinite)) r0 = [1.3, 1.7, 6.1, 5.6];
+  const MIN = 1;                                        // keep the RoI inside the map and at least one cell wide
+  const roi = [Lab.clamp(r0[0], 0, N - MIN), Lab.clamp(r0[1], 0, N - MIN), 0, 0];
+  roi[2] = Lab.clamp(r0[2], roi[0] + MIN, N); roi[3] = Lab.clamp(r0[3], roi[1] + MIN, N);
+  let sel = { i: S.bi, j: S.bj, si: S.si, sj: S.sj };   // selected bin and sample (si < 0: no sample)
+
+  const cpool = Lab.canvas("#fig-pool", M, M, { framed: true });
+  const calign = Lab.canvas("#fig-align", M, M, { framed: true });
+  const cout = Lab.canvas("#fig-out", 360, 136);
+  const csw = Lab.canvas("#fig-sweep", 240, 136);
+
+  // ---- controls
+  Lab.select("#c-main", { label: "feature map", options: Object.keys(FIELDS), value: S.field, onChange: (v) => { S.field = v; redraw(); } });
+  Lab.segmented("#c-main", { label: "output size P x P", options: [{ value: 2, label: "2x2" }, { value: 3, label: "3x3" }, { value: 4, label: "4x4" }, { value: 7, label: "7x7" }],
+    value: S.out, onChange: (v) => { S.out = v; sel = { i: -1, j: -1, si: 0, sj: 0 }; redraw(); } });
+  Lab.segmented("#c-main", { label: "RoIAlign sampling ratio (points per bin side)", options: [1, 2, 4], value: S.sr, onChange: (v) => { S.sr = v; sel.si = sel.sj = 0; redraw(); } });
+  Lab.segmented("#c-main", { label: "stride of this map (image px per cell)", options: [16, 32], value: S.stride, onChange: (v) => { S.stride = v; redraw(); } });
+  Lab.toggle("#c-main", { label: "torchvision.ops.roi_pool convention (+1: the end cell counts too)", value: S.plus1, onChange: (v) => { S.plus1 = v; redraw(); } });
+  const nudge = (dx) => { const w = roi[2] - roi[0]; roi[0] = r2(Lab.clamp(roi[0] + dx, 0, N - w)); roi[2] = r2(roi[0] + w); redraw(); };
+  Lab.button("#c-nudge", "◀ 0.1 cell", () => nudge(-0.1));
+  Lab.button("#c-nudge", "0.1 cell ▶", () => nudge(0.1));
+
+  // ---- pointer: drag / resize the RoI on either map; hover selects a bin or a sample
+  let drag = null, last = null;
+  const toCell = (p) => ({ x: p.x / CELL, y: p.y / CELL });
+  function hitRoi(p) {
+    const q = toCell(p), tol = 7 / CELL, [x1, y1, x2, y2] = roi;
+    if (q.x < x1 - tol || q.x > x2 + tol || q.y < y1 - tol || q.y > y2 + tol) return null;
+    const mode = (Math.abs(q.y - y1) < tol ? "n" : Math.abs(q.y - y2) < tol ? "s" : "") + (Math.abs(q.x - x1) < tol ? "w" : Math.abs(q.x - x2) < tol ? "e" : "");
+    return mode || "move";
+  }
+  const CURSOR = { move: "move", n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize" };
+  const r2 = (v) => Math.round(v * 100) / 100;
+  function pickOnMap(which, p) {
+    if (!last) return;
+    const q = toCell(p);
+    if (which === "align") {                           // nearest sample point within 10 px, else the exact bin under the pointer
+      let best = null, bd = 10 / CELL;
+      last.al.samples.forEach((list, b) => list.forEach((s, k) => { const dd = Math.hypot(s.x + 0.5 - q.x, s.y + 0.5 - q.y); if (dd < bd) { bd = dd; best = [b, k]; } }));
+      if (best) { sel = { i: Math.floor(best[0] / S.out), j: best[0] % S.out, si: Math.floor(best[1] / S.sr), sj: best[1] % S.sr }; return; }
+      const j = Math.floor((q.x - roi[0]) / ((roi[2] - roi[0]) / S.out)), i = Math.floor((q.y - roi[1]) / ((roi[3] - roi[1]) / S.out));
+      if (i >= 0 && j >= 0 && i < S.out && j < S.out) sel = { i, j, si: -1, sj: -1 };
+    } else {
+      const b = last.pl.bins.findIndex(([xa, ya, xb, yb]) => q.x >= xa && q.x < xb && q.y >= ya && q.y < yb);
+      if (b >= 0) sel = { i: Math.floor(b / S.out), j: b % S.out, si: -1, sj: -1 };
+    }
+  }
+  for (const [cv, which] of [[cpool, "pool"], [calign, "align"]]) {
+    Lab.pointer(cv, {
+      down(p) { const mode = hitRoi(p); drag = mode ? { mode, p0: toCell(p), o: roi.slice() } : null; if (!drag) { pickOnMap(which, p); redraw(); } },
+      move(p) {
+        if (!drag) return;
+        const q = toCell(p), dx = q.x - drag.p0.x, dy = q.y - drag.p0.y, o = drag.o;
+        if (drag.mode === "move") {
+          const w = o[2] - o[0], h = o[3] - o[1];
+          roi[0] = r2(Lab.clamp(o[0] + dx, 0, N - w)); roi[1] = r2(Lab.clamp(o[1] + dy, 0, N - h)); roi[2] = r2(roi[0] + w); roi[3] = r2(roi[1] + h);
+        } else {
+          if (drag.mode.includes("w")) roi[0] = r2(Lab.clamp(o[0] + dx, 0, o[2] - MIN));
+          if (drag.mode.includes("e")) roi[2] = r2(Lab.clamp(o[2] + dx, o[0] + MIN, N));
+          if (drag.mode.includes("n")) roi[1] = r2(Lab.clamp(o[1] + dy, 0, o[3] - MIN));
+          if (drag.mode.includes("s")) roi[3] = r2(Lab.clamp(o[3] + dy, o[1] + MIN, N));
+        }
+        redraw();
+      },
+      up() { drag = null; },
+      hover(p) { const mode = hitRoi(p); cv.canvas.style.cursor = mode && mode !== "move" ? CURSOR[mode] : mode ? "move" : "default"; pickOnMap(which, p); redraw(); },
+    });
+  }
+  Lab.pointer(cout, {
+    hover(p) {
+      const P = S.out, g = gridGeom(P);
+      for (let k = 0; k < 3; k++) {
+        const j = Math.floor((p.x - g.x[k]) / g.cw), i = Math.floor((p.y - g.y) / g.cw);
+        if (i >= 0 && j >= 0 && i < P && j < P) { sel = { i, j, si: -1, sj: -1 }; redraw(); return; }
+      }
+    },
+  });
+
+  // ---- drawing
+  const gridGeom = (P) => { const size = 104, gap = 24; return { x: [0, size + gap, 2 * (size + gap)], y: 20, cw: size / P, size }; };
+  function draw() {
+    const F = Float64Array.from(FIELDS[S.field].v), dg = FIELDS[S.field].d, P = S.out, sr = S.sr;
+    let lo = Infinity, hi = -Infinity; for (const v of F) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const gray = (v) => Lab.grayRGB(0.42 + 0.55 * (v - lo) / Math.max(1e-9, hi - lo));
+    const al = RA.roiAlign(F, N, N, roi, P, sr), pl = RA.roiPool(F, N, N, roi, P, S.plus1);
+    last = { al, pl };
+    if (sel.i < 0 || sel.j < 0 || sel.i >= P || sel.j >= P) { sel.i = sel.j = Math.floor(P / 2); }
+    if (sel.si >= sr || sel.sj >= sr) sel.si = sel.sj = 0;
+    const b = sel.i * P + sel.j;
+    const c1 = Lab.color("--c1"), c2 = Lab.color("--c2"), hl = Lab.color("--hl"), muted = Lab.color("--muted");
+    const fmtCell = (v) => v.toFixed(dg);
+
+    function base(cv) {
+      const g = cv.ctx; cv.clear();
+      Lab.cells(g, F, N, N, 0, 0, M, M, { gap: 0, color: gray, fmt: fmtCell, size: dg === 2 ? 9.5 : 10.5 });
+      g.strokeStyle = Lab.alpha("--ink", 0.15); g.lineWidth = 1; g.beginPath();
+      for (let k = 1; k < N; k++) { g.moveTo(k * CELL + 0.5, 0); g.lineTo(k * CELL + 0.5, M); g.moveTo(0, k * CELL + 0.5); g.lineTo(M, k * CELL + 0.5); }
+      g.stroke();
+      return g;
+    }
+    const R = (r) => [r[0] * CELL, r[1] * CELL, r[2] * CELL, r[3] * CELL];
+
+    // RoI pooling map: true box (dashed), snapped box, integer bins, argmax cells, cells read by several bins
+    let g = base(cpool);
+    const uses = new Int32Array(N * N);
+    pl.bins.forEach(([xa, ya, xb, yb]) => { for (let r = ya; r < yb; r++) for (let c = xa; c < xb; c++) uses[r * N + c]++; });
+    const [hxa, hya, hxb, hyb] = pl.bins[b];
+    g.fillStyle = Lab.alpha("--c2", 0.28); g.fillRect(hxa * CELL, hya * CELL, (hxb - hxa) * CELL, (hyb - hya) * CELL);
+    pl.bins.forEach(([xa, ya, xb, yb], k) => {
+      const inset = 2 + ((Math.floor(k / P) + (k % P)) % 2) * 2;      // alternate insets so overlapping bins stay visible
+      g.strokeStyle = c2; g.lineWidth = k === b ? 2.5 : 1.3;
+      g.strokeRect(xa * CELL + inset, ya * CELL + inset, (xb - xa) * CELL - 2 * inset, (yb - ya) * CELL - 2 * inset);
+    });
+    Lab.box(g, R(pl.snapped), { color: c2, width: 3 });
+    Lab.box(g, R(roi), { color: c1, width: 2, dash: [6, 4] });
+    pl.arg.forEach((at, k) => { if (!at) return; g.fillStyle = k === b ? hl : c2; g.beginPath(); g.arc((at[1] + 0.5) * CELL, (at[0] + 1) * CELL - 5, k === b ? 3.5 : 2.5, 0, 2 * Math.PI); g.fill(); });
+    let shared = 0, read = 0; for (let c = 0; c < N * N; c++) { if (uses[c]) read++; if (uses[c] > 1) shared++; }
+
+    // RoIAlign map: exact bins, sample points, the selected sample's 4 neighbours
+    g = base(calign);
+    const bw = (roi[2] - roi[0]) / P, bh = (roi[3] - roi[1]) / P;
+    g.fillStyle = Lab.alpha("--c1", 0.22); g.fillRect((roi[0] + sel.j * bw) * CELL, (roi[1] + sel.i * bh) * CELL, bw * CELL, bh * CELL);
+    g.strokeStyle = c1; g.lineWidth = 1.2; g.beginPath();
+    for (let k = 1; k < P; k++) {
+      g.moveTo((roi[0] + k * bw) * CELL, roi[1] * CELL); g.lineTo((roi[0] + k * bw) * CELL, roi[3] * CELL);
+      g.moveTo(roi[0] * CELL, (roi[1] + k * bh) * CELL); g.lineTo(roi[2] * CELL, (roi[1] + k * bh) * CELL);
+    }
+    g.stroke();
+    Lab.box(g, R(roi), { color: c1, width: 2.5 });
+    const rad = P * sr > 16 ? 1.8 : P * sr > 8 ? 2.6 : 3.4;
+    al.samples.forEach((list) => list.forEach((s) => { g.fillStyle = c1; g.strokeStyle = "#fff"; g.lineWidth = 1; g.beginPath(); g.arc((s.x + 0.5) * CELL, (s.y + 0.5) * CELL, rad, 0, 2 * Math.PI); g.fill(); g.stroke(); }));
+    const smp = sel.si >= 0 ? al.samples[b][sel.si * sr + sel.sj] : null;
+    if (smp) {
+      const sx = (smp.x + 0.5) * CELL, sy = (smp.y + 0.5) * CELL;
+      g.save(); g.strokeStyle = hl; g.lineWidth = 2;
+      for (const [r, c, w] of smp.nb) {
+        if (w <= 0) continue;
+        const cx = (c + 0.5) * CELL, cy = (r + 0.5) * CELL;
+        g.strokeRect(c * CELL + 1.5, r * CELL + 1.5, CELL - 3, CELL - 3);
+        g.beginPath(); g.moveTo(sx, sy); g.lineTo(cx, cy); g.stroke();
+      }
+      g.restore();
+      for (const [r, c, w] of smp.nb) if (w > 0) {
+        const t = w.toFixed(2), cx = (c + 0.5) * CELL, cy = (r + 0.5) * CELL + 10;
+        g.save(); g.font = '700 9.5px system-ui, -apple-system, "Segoe UI", sans-serif'; const tw = g.measureText(t).width + 6;
+        g.fillStyle = hl; g.beginPath(); g.roundRect(cx - tw / 2, cy - 6, tw, 12, 3); g.fill();
+        g.fillStyle = "#fff"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(t, cx, cy + 0.5); g.restore();
+      }
+      g.fillStyle = hl; g.strokeStyle = "#fff"; g.lineWidth = 1.5; g.beginPath(); g.arc(sx, sy, 5, 0, 2 * Math.PI); g.fill(); g.stroke();
+    }
+
+    // outputs: pool | align | align - pool
+    const o = cout.ctx; cout.clear();
+    const gg = gridGeom(P), showNum = gg.cw >= 24, dd = P <= 3 ? 2 : 1;
+    const diff = al.out.map((v, k) => v - pl.out[k]);
+    const dmax = Math.max(1e-9, ...diff.map(Math.abs));
+    const grids = [[pl.out, gray, "RoI pooling (max)"], [al.out, gray, "RoIAlign (mean)"], [diff, (v) => Lab.divergingRGB(v / dmax), "align − pool"]];
+    grids.forEach(([vals, col, title], k) => {
+      Lab.text(o, title, gg.x[k], 12, { size: 11, weight: 600 });
+      Lab.cells(o, vals, P, P, gg.x[k], gg.y, gg.size, gg.size, { color: col, values: showNum, size: Math.min(12, gg.cw * 0.34),
+        fmt: (v) => (k === 2 && v > 0 ? "+" : "") + v.toFixed(dd), highlight: (i, j) => i === sel.i && j === sel.j });
+    });
+    Lab.$("#cap-out").innerHTML = `outputs <small>${P} x ${P}${showNum ? "" : ", values on hover"}; hover a bin</small>`;
+
+    // sweep: the selected bin while the RoI slides sideways by up to one cell
+    const s = csw.ctx; csw.clear();
+    const w = roi[2] - roi[0], dlo = Math.max(-1, -roi[0]), dhi = Math.min(1, N - roi[2]), K = 200;
+    const pts = [[], []];
+    for (let k = 0; k <= K; k++) {
+      const dx = dlo + ((dhi - dlo) * k) / K, r = [roi[0] + dx, roi[1], roi[0] + dx + w, roi[3]];
+      pts[0].push([dx, RA.roiPool(F, N, N, r, P, S.plus1).out[b]]); pts[1].push([dx, RA.roiAlign(F, N, N, r, P, sr).out[b]]);
+    }
+    let ylo = Infinity, yhi = -Infinity; for (const l of pts) for (const [, v] of l) { ylo = Math.min(ylo, v); yhi = Math.max(yhi, v); }
+    const pad = Math.max(0.2, (yhi - ylo) * 0.12); ylo = Math.floor((ylo - pad) * 2) / 2; yhi = Math.ceil((yhi + pad) * 2) / 2;
+    const ax = Lab.axes(s, { x: 30, y: 8, w: 202, h: 90, xmin: -1, xmax: 1, ymin: ylo, ymax: yhi, xticks: [-1, -0.5, 0, 0.5, 1], yticks: [ylo, (ylo + yhi) / 2, yhi],
+      xlabel: `RoI shift in cells (x ${S.stride} = image px)` });
+    s.fillStyle = Lab.color("--wash"); if (dlo > -1) s.fillRect(ax.sx(-1), 8, ax.sx(dlo) - ax.sx(-1), 90); if (dhi < 1) s.fillRect(ax.sx(dhi), 8, ax.sx(1) - ax.sx(dhi), 90);
+    const steps = []; pts[0].forEach(([x, v], k) => { if (k) steps.push([x, pts[0][k - 1][1]]); steps.push([x, v]); });
+    ax.line(steps, c2, 2); ax.line(pts[1], c1, 2);
+    s.strokeStyle = Lab.color("--ink-2"); s.setLineDash([3, 3]); s.beginPath(); s.moveTo(ax.sx(0) + 0.5, 8); s.lineTo(ax.sx(0) + 0.5, 98); s.stroke(); s.setLineDash([]);
+    ax.dot(0, pl.out[b], c2); ax.dot(0, al.out[b], c1);
+    Lab.$("#cap-sweep").innerHTML = `bin (${sel.i}, ${sel.j}) as the box slides <small>now = dashed line</small>`;
+
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${c1}"></i>proposal, RoIAlign bins and samples</span><span><i style="background:${c2}"></i>RoI pooling box, bins, max cell</span>` +
+      `<span><i style="background:${hl}"></i>selected bin / sample</span>`;
+
+    // misalignment in cells and pixels
+    let snapE = 0; for (let k = 0; k < 4; k++) snapE = Math.max(snapE, Math.abs(pl.snapped[k] - roi[k]));   // with +1 the read region ends one cell later
+    let binE = 0;
+    pl.bins.forEach(([xa, ya, xb, yb], k) => {
+      const i = Math.floor(k / P), j = k % P;
+      binE = Math.max(binE, Math.abs(xa - (roi[0] + j * bw)), Math.abs(xb - (roi[0] + (j + 1) * bw)), Math.abs(ya - (roi[1] + i * bh)), Math.abs(yb - (roi[1] + (i + 1) * bh)));
+    });
+    const st = S.stride, maxd = Math.max(...diff.map(Math.abs));
+    Lab.$("#mis").innerHTML =
+      `<span class="dim">RoI [${roi.map((v) => v.toFixed(2)).join(", ")}] in cells; stride ${st}: 1 cell = ${st} image px</span>\n` +
+      `RoI pooling  box edges moved by up to ${snapE.toFixed(2)} cells = <b>${(snapE * st).toFixed(1)} px</b>\n` +
+      `             bin edges off by up to   ${binE.toFixed(2)} cells = <b>${(binE * st).toFixed(1)} px</b>\n` +
+      `             ${shared} of the ${read} cells it reads are read by 2+ bins\n` +
+      `RoIAlign     0 px: never rounds.   max |align − pool| = ${maxd.toFixed(2)}`;
+
+    // what the selected bin / sample computes
+    const [bxa, bya, bxb, byb] = pl.bins[b], at = pl.arg[b];
+    const span = (a0, a1) => (a1 - a0 > 1 ? `${a0}-${a1 - 1}` : `${a0}`);
+    let txt = `bin (${sel.i}, ${sel.j})\n` +
+      `pool:  max of rows ${span(bya, byb)}, cols ${span(bxa, bxb)}\n` +
+      `       = ${at ? `f[${at[0]},${at[1]}] = ` : ""}<b>${pl.out[b].toFixed(2)}</b>\n` +
+      `align: mean of ${sr * sr} sample${sr > 1 ? "s" : ""} = <b>${al.out[b].toFixed(3)}</b>`;
+    if (smp) {
+      txt += `\n<span class="dim">sample (${sel.si}, ${sel.sj}) at y ${(smp.y + 0.5).toFixed(2)}, x ${(smp.x + 0.5).toFixed(2)}\n` +
+        `  −0.5 → index (${smp.y.toFixed(2)}, ${smp.x.toFixed(2)})</span>\n` +
+        smp.nb.filter(([, , w]) => w > 0).map(([r, c, w]) => `  f[${r},${c}] ${F[r * N + c].toFixed(Math.max(1, dg))} × ${w.toFixed(3)}`).join("\n") +
+        `\n  sum = ${smp.v.toFixed(3)}`;
+    } else txt += `\n<span class="dim">hover a blue sample point to see its\nfour neighbours and bilinear weights</span>`;
+    Lab.$("#calc").innerHTML = txt;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Convolution playground</title>
+<meta name="lab-notebook" content="D1-01">
+<meta name="lab-summary" content="Edit a 3x3 kernel and watch the output; hover any pixel to see patch x kernel = one number. Stride, padding, dilation.">
+<meta name="lab-height" content="700">
+<link rel="stylesheet" href="lab.css">
+<style>
+  #kernel td input { font-weight: 600; }
+  .under { margin-top: 12px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Convolution playground</h1><span class="lab-tag">D1-01 · sections 2-4</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Every output pixel is one sum: the kernel multiplied with the patch under it. Move the pointer over
+    either image to pick a position, edit the kernel, and change the geometry.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig"><figcaption id="cap-in">input</figcaption><div id="fig-in"></div></figure>
+        <figure class="lab-fig"><figcaption id="cap-out">output</figcaption><div id="fig-out"></div></figure>
+      </div>
+      <div class="under">
+        <p class="lab-cap" id="cap-calc">under the pointer</p>
+        <div id="fig-calc"></div>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-preset"></div>
+      <div class="ctl">
+        <span class="ctl-label"><span>kernel w (click a number to edit)</span></span>
+        <table class="cells" id="kernel"></table>
+      </div>
+      <div id="c-geo" class="lab-controls"></div>
+      <div class="formula" id="formula"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Pick <b>sobel x</b>. Which edges will light up: the vertical ones (shoulders, sides of the face) or the horizontal ones?
+        Now switch to <b>sobel y</b>.
+        <details><summary>why</summary><p>Sobel x subtracts the left column from the right column, so it is large where brightness
+          changes from left to right: vertical edges. Blue = dark-to-bright, red = bright-to-dark. Sobel y is the same kernel rotated.</p></details></li>
+      <li>Hover a flat region (the background) with <b>laplacian</b> selected. What is the output, and why does it not depend on how bright the region is?
+        <details><summary>why</summary><p>The weights sum to 0, so a constant patch gives c * 0 = 0. Any kernel that sums to zero ignores
+          flat areas and responds only to change; a kernel that sums to 1 (blur, sharpen) keeps the overall brightness.</p></details></li>
+      <li>Type a kernel that <b>shifts the image one pixel to the right</b>. (Start from identity.)
+        <details><summary>answer</summary><p>Put the single 1 in the middle-left cell. out[i, j] then copies x[i, j-1]: every output
+          pixel takes the value of its left neighbour, so the content moves right.</p></details></li>
+      <li>Before clicking: with padding 0 and stride 2, how large is the output of this 64 px image? Check with the formula box.
+        <details><summary>answer</summary><p>floor((64 + 0 - 3) / 2) + 1 = 31. Stride 2 keeps every second position, which is how convnets downsample.</p></details></li>
+      <li>Set dilation to 3 with <b>sobel x</b> and hover the input. What happened to the taps, the parameter count, and the edges?
+        <details><summary>why</summary><p>Still 9 weights, but spread over a 7x7 area (k_eff = 3 * (3 - 1) + 1). The receptive field grows for
+          free, the edges get thicker, and with padding 1 the output shrinks because the effective kernel is larger.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(async () => {
+  const KERNELS = {
+    "identity": [0, 0, 0, 0, 1, 0, 0, 0, 0],
+    "box blur": Array(9).fill(1 / 9),
+    "gaussian": [1, 2, 1, 2, 4, 2, 1, 2, 1].map((v) => v / 16),
+    "sharpen": [0, -1, 0, -1, 5, -1, 0, -1, 0],
+    "sobel x": [-1, 0, 1, -2, 0, 2, -1, 0, 1],
+    "sobel y": [-1, -2, -1, 0, 0, 0, 1, 2, 1],
+    "laplacian": [0, 1, 0, 1, -4, 1, 0, 1, 0],
+    "emboss": [-2, -1, 0, -1, 1, 1, 0, 1, 2],
+  };
+  const S = Lab.params({ kernel: "sobel x", stride: 1, pad: 1, dilation: 1, relu: false, hi: 22, hj: 30 });
+  let k = (KERNELS[S.kernel] || KERNELS["sobel x"]).slice();
+
+  // 64 x 64 grayscale input: the sample photo averaged 2 x 2
+  const photo = await Lab.photo();
+  const N = 64, x = new Float32Array(N * N);
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const a = (2 * i) * photo.w + 2 * j;
+    x[i * N + j] = (photo.gray[a] + photo.gray[a + 1] + photo.gray[a + photo.w] + photo.gray[a + photo.w + 1]) / 4;
+  }
+  const PX = 4;                                   // screen pixels per image pixel, same for input and output
+  const cin = Lab.canvas("#fig-in", N * PX, N * PX, { framed: true });
+  const cout = Lab.canvas("#fig-out", N * PX, N * PX, { framed: true });
+  const ccalc = Lab.canvas("#fig-calc", 540, 124);
+
+  // ---- controls
+  const preset = Lab.select("#c-preset", {
+    label: "preset", options: [...Object.keys(KERNELS), "custom"], value: KERNELS[S.kernel] ? S.kernel : "sobel x",
+    onChange: (v) => { if (KERNELS[v]) { k = KERNELS[v].slice(); fillKernel(); redraw(); } },
+  });
+  const table = Lab.$("#kernel"), inputs = [];
+  for (let u = 0; u < 3; u++) {
+    const tr = Lab.el("tr");
+    for (let v = 0; v < 3; v++) {
+      const inp = Lab.el("input", { type: "number", step: "0.5", "aria-label": `kernel row ${u + 1} column ${v + 1}` });
+      inp.addEventListener("input", () => { const n = parseFloat(inp.value); k[u * 3 + v] = Number.isNaN(n) ? 0 : n; preset.set("custom"); paintKernel(); redraw(); });
+      inputs.push(inp); tr.append(Lab.el("td", {}, inp));
+    }
+    table.append(tr);
+  }
+  function paintKernel() {
+    const m = Math.max(1e-6, ...k.map(Math.abs));
+    inputs.forEach((inp, i) => { const c = Lab.divergingRGB(k[i] / m); inp.parentElement.style.background = `rgb(${c})`; inp.style.color = Lab.inkOn(c); });
+  }
+  function fillKernel() { inputs.forEach((inp, i) => { inp.value = +k[i].toFixed(3); }); paintKernel(); }
+  fillKernel();
+  Lab.segmented("#c-geo", { label: "stride s", options: [1, 2, 3], value: S.stride, onChange: (v) => { S.stride = v; redraw(); } });
+  Lab.segmented("#c-geo", { label: "padding p (zeros on every side)", options: [0, 1, 2, 3], value: S.pad, onChange: (v) => { S.pad = v; redraw(); } });
+  Lab.segmented("#c-geo", { label: "dilation d", options: [1, 2, 3], value: S.dilation, onChange: (v) => { S.dilation = v; redraw(); } });
+  Lab.toggle("#c-geo", { label: "apply ReLU (clip negatives to 0)", value: S.relu, onChange: (v) => { S.relu = v; redraw(); } });
+
+  // ---- maths
+  const at = (i, j) => (i < 0 || j < 0 || i >= N || j >= N ? 0 : x[i * N + j]);           // zero padding
+  function geometry() { const keff = S.dilation * 2 + 1; const n = Math.floor((N + 2 * S.pad - keff) / S.stride) + 1; return { keff, n: Math.max(0, n) }; }
+  function patchAt(i, j) {                        // the 9 input values under output position (i, j), and where they come from
+    const vals = [], pos = [];
+    for (let u = 0; u < 3; u++) for (let v = 0; v < 3; v++) {
+      const r = i * S.stride - S.pad + u * S.dilation, c = j * S.stride - S.pad + v * S.dilation;
+      vals.push(at(r, c)); pos.push([r, c]);
+    }
+    return { vals, pos };
+  }
+  function convolve(n) {
+    const out = new Float32Array(n * n);
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      let s = 0;
+      for (let u = 0; u < 3; u++) for (let v = 0; v < 3; v++) s += k[u * 3 + v] * at(i * S.stride - S.pad + u * S.dilation, j * S.stride - S.pad + v * S.dilation);
+      out[i * n + j] = S.relu ? Math.max(0, s) : s;
+    }
+    return out;
+  }
+
+  // ---- pointer: both images select an output position
+  const pick = (which) => (p) => {
+    const { n } = geometry(); if (!n) return;
+    let i, j;
+    if (which === "out") { i = Math.floor(p.y / PX); j = Math.floor(p.x / PX); }
+    else { i = Math.round((p.y / PX - 0.5 + S.pad - S.dilation) / S.stride); j = Math.round((p.x / PX - 0.5 + S.pad - S.dilation) / S.stride); }
+    S.hi = Lab.clamp(i, 0, n - 1); S.hj = Lab.clamp(j, 0, n - 1); redraw();
+  };
+  Lab.pointer(cin, { hover: pick("in"), down: pick("in"), move: pick("in") });
+  Lab.pointer(cout, { hover: pick("out"), down: pick("out"), move: pick("out") });
+
+  // ---- drawing
+  function draw() {
+    const { keff, n } = geometry();
+    const hl = Lab.color("--hl");
+    S.hi = Lab.clamp(S.hi, 0, Math.max(0, n - 1)); S.hj = Lab.clamp(S.hj, 0, Math.max(0, n - 1));
+    const out = convolve(n);
+    const signed = !S.relu && k.some((v) => v < 0) && Math.abs(k.reduce((a, b) => a + b, 0)) < 0.5;   // edge-like kernels: show the sign
+    const mags = Array.from(out, Math.abs).sort((a, b) => a - b);
+    const scale = Math.max(1e-6, mags[Math.floor(mags.length * 0.99)] || 1);            // robust maximum of |out|
+    const sorted = Array.from(out).sort((a, b) => a - b);
+    const lo = Math.min(0, sorted[Math.floor(sorted.length * 0.01)] || 0), hi = Math.max(S.relu ? 1e-6 : 1, sorted[Math.floor(sorted.length * 0.99)] || 1);
+
+    // input with the 9 taps of the selected position
+    cin.clear();
+    Lab.image(cin.ctx, x, N, N, 0, 0, N * PX, N * PX);
+    const { vals, pos } = patchAt(S.hi, S.hj);
+    cin.ctx.save();
+    cin.ctx.strokeStyle = hl; cin.ctx.lineWidth = 2;
+    const [r0, c0] = pos[0];
+    if (S.dilation === 1) cin.ctx.strokeRect(c0 * PX - 1, r0 * PX - 1, 3 * PX + 2, 3 * PX + 2);
+    else {
+      cin.ctx.setLineDash([3, 3]); cin.ctx.strokeRect(c0 * PX - 1, r0 * PX - 1, keff * PX + 2, keff * PX + 2); cin.ctx.setLineDash([]);
+      for (const [r, c] of pos) cin.ctx.strokeRect(c * PX - 0.5, r * PX - 0.5, PX + 1, PX + 1);
+    }
+    cin.ctx.restore();
+
+    // output at the same scale as the input, so downsampling is visible
+    cout.clear();
+    if (n) {
+      Lab.image(cout.ctx, out, n, n, 0, 0, n * PX, n * PX, signed ? (v) => Lab.divergingRGB(v / scale) : (v) => Lab.grayRGB((v - lo) / (hi - lo)));
+      cout.ctx.save(); cout.ctx.strokeStyle = hl; cout.ctx.lineWidth = 2;
+      cout.ctx.strokeRect(S.hj * PX - 2, S.hi * PX - 2, PX + 4, PX + 4); cout.ctx.restore();
+    }
+    Lab.$("#cap-in").innerHTML = `input x <small>${N} x ${N}, grayscale</small>`;
+    Lab.$("#cap-out").innerHTML = `output <small>${n} x ${n}${n < N ? ", drawn at the same pixel size" : ""}</small>`;
+
+    // patch * kernel = products -> sum
+    const g = ccalc.ctx; ccalc.clear();
+    const cell = 34, top = 20, W = 3 * cell;
+    const prods = vals.map((v, i) => v * k[i]);
+    const sum = prods.reduce((a, b) => a + b, 0);
+    const km = Math.max(1e-6, ...k.map(Math.abs)), pm = Math.max(1e-6, ...prods.map(Math.abs));
+    const f2 = (v) => (Math.abs(v) < 0.005 ? "0" : v.toFixed(2));
+    Lab.text(g, "patch of x", 0, 12, { size: 11.5 });
+    Lab.cells(g, vals, 3, 3, 0, top, W, W, { color: (v) => Lab.grayRGB(v), fmt: f2, size: 11 });
+    Lab.text(g, "×", W + 16, top + W / 2, { size: 18, align: "center", baseline: "middle" });
+    Lab.text(g, "kernel w", W + 32, 12, { size: 11.5 });
+    Lab.cells(g, k, 3, 3, W + 32, top, W, W, { color: (v) => Lab.divergingRGB(v / km), fmt: f2, size: 11 });
+    Lab.text(g, "=", 2 * W + 48, top + W / 2, { size: 18, align: "center", baseline: "middle" });
+    Lab.text(g, "products", 2 * W + 64, 12, { size: 11.5 });
+    Lab.cells(g, prods, 3, 3, 2 * W + 64, top, W, W, { color: (v) => Lab.divergingRGB(v / pm), fmt: f2, size: 11 });
+    const tx = 3 * W + 84;
+    Lab.text(g, "sum of the 9 products", tx, top + 22, { size: 11.5 });
+    Lab.text(g, `${sum < 0 ? "−" : ""}${Math.abs(sum).toFixed(3)}`, tx, top + 52, { size: 24, weight: 650, color: Lab.color("--ink") });
+    if (S.relu) Lab.text(g, `after ReLU: ${Math.max(0, sum).toFixed(3)}`, tx, top + 74, { size: 11.5 });
+    Lab.text(g, `= out[${S.hi}, ${S.hj}]`, tx, top + (S.relu ? 92 : 74), { size: 11.5, mono: true });
+    Lab.$("#cap-calc").innerHTML = `under the pointer <small>output position (${S.hi}, ${S.hj}) reads input rows ${pos[0][0]}..${pos[8][0]}, columns ${pos[0][1]}..${pos[8][1]}${pos.some(([r, c]) => r < 0 || c < 0 || r >= N || c >= N) ? " - the zeros are padding" : ""}</small>`;
+
+    Lab.$("#formula").innerHTML =
+      `k_eff = d(k-1)+1 = ${S.dilation}*2+1 = <b>${keff}</b>\n` +
+      `n_out = floor((n+2p-k_eff)/s)+1\n` +
+      `      = floor((${N}+${2 * S.pad}-${keff})/${S.stride})+1 = <b>${n}</b>`;
+    Lab.$("#legend").innerHTML = signed
+      ? `<span><i style="background:${Lab.color("--div-pos")}"></i>positive response</span><span><i style="background:${Lab.color("--div-neg")}"></i>negative</span><span><i style="background:${Lab.color("--div-mid")}"></i>zero</span>`
+      : `<span>output in grey: black = ${f2(lo)}, white = ${f2(hi)}</span>`;
+    paintKernel();
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, FancyBboxPatch, Circle
 import torch, torch.nn as nn, torch.nn.functional as F
 import torchvision
-from cvcourse import viz, boxes, shapes, tests, torchkit, day2
+from cvcourse import viz, boxes, shapes, tests, torchkit, day2, labs
 
 %matplotlib inline
 plt.rcParams["figure.dpi"] = 90
@@ -69,11 +69,23 @@ CELLS = [
     the image size.
     """),
     md(r"""
+    ### Lab · Grid assignment
+    **Predict first:** two small objects whose box centres fall into the same cell. What does the
+    target tensor hold for that cell: both boxes, their average, or one of them? And which class?
+    Drag the shapes to check, then work through the "Try this" list under the lab (5 minutes).
+    """),
+    code("""
+    labs.show("grid-assignment")
+    """),
+    md(r"""
     ### Exercise 1 · the dense target tensor
 
-    `grid_targets(boxes, labels, grid, size, num_classes)` -> `(grid, grid, 5 + C)`:
-    channel 0 objectness, 1-4 normalised `(cx, cy, w, h)`, then a one-hot class.
+    `grid_targets(boxes, labels, grid, size, num_classes)` -> a float32 array `(grid, grid, 5 + C)`
+    indexed `[row, col, channel]` (channels last; the training code permutes it to channels-first
+    later). `boxes` is `(N, 4)` xyxy in pixels, `labels` holds class indices `0 .. C-1`.
+    Channel 0 objectness, 1-4 normalised `(cx, cy, w, h)`, then a one-hot class.
     The responsible cell is `(row, col) = (int(cy // cell), int(cx // cell))`.
+    These are exactly the 8 numbers per object in the table under the lab.
     """),
     exercise(
         stub=r"""
@@ -125,6 +137,11 @@ CELLS = [
         a.set_title(f"channel {c}: {names[c]}", fontsize=9); a.set_xticks([]); a.set_yticks([])
     fig.suptitle("The target tensor (8, 8, 5 + 3): only responsible cells carry a box and a class", y=1.0)
     plt.show()
+    """),
+    md(r"""
+    What to look at: every channel is zero except in the four responsible (yellow) cells, and the box
+    channels hold numbers relative to the *whole image*: the circle on the right has `cx = 0.84`
+    whatever cell it sits in. The other 60 cells only teach "no object".
     """),
 
     # ------------------------------------------------------------------ 2
@@ -216,6 +233,11 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    What to look at: the class loss is close to 0 after two epochs (telling circles from squares is
+    easy), while the box loss keeps falling until the last epoch: placing a box to the pixel is the
+    hard part of detection.
+    """),
+    md(r"""
     ### Exercise 3 · decode the grid
 
     Inverse of Exercise 1 for a prediction `(G, G, 5 + C)` whose objectness and classes are already
@@ -276,6 +298,10 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    In the objectness grids (bottom row), some objects light up two neighbouring cells: their centre
+    lies near a cell border, and two cells that see almost the same pixels are both fairly confident
+    (the border jump of the lab's "Try this" 3). Class-wise NMS then keeps one of the two boxes.
+
     Expected: **mAP@0.5 above 0.95** after ~6 epochs (well above the 0.9 target), and mAP@[.5:.95]
     around 0.8: the grid detector finds everything, its boxes are good but not pixel-perfect.
     That is a complete detector: ~300 k parameters, one forward pass, decode, NMS.
@@ -315,6 +341,9 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    What to look at: from left to right the cells grow from 8 px to the whole image and the default
+    boxes from 20% to 90% of the image, so each map is responsible for one band of object sizes.
+
     SSD's problem: the high-resolution maps come from **early** layers, which see edges, not
     objects - so small-object detection stayed weak. The **Feature Pyramid Network** (Lin et al.
     2017) gives every level both resolution *and* semantics:
@@ -357,11 +386,23 @@ CELLS = [
     plt.show()
     """),
     md(r"""
+    ### Lab · FPN levels
+    **Predict first:** a 16 x 16 px object in a 512 px image. What fraction of one $P_5$ cell (stride 32)
+    does it cover, and which level will RetinaNet's anchors assign it to? Use the size presets to
+    check, then open the "top-down pathway" view and predict the shapes before you write the
+    `FPN` below (6 minutes).
+    """),
+    code("""
+    labs.show("fpn-levels")
+    """),
+    md(r"""
     ### Exercise 4 · `FPN`
 
     `FPN(in_channels_list, out_channels)` with `nn.ModuleList`s `lateral` (1x1) and `smooth` (3x3,
     padding 1). `forward(feats)` takes the list `[C3, C4, C5]` (finest first) and returns
     `[P3, P4, P5]`. Upsample with `F.interpolate(top, size=lat.shape[-2:], mode="nearest")`.
+    Every $P_i$ has `out_channels` channels and the height and width of its $C_i$: the shapes of the
+    lab's pathway view.
     """),
     exercise(
         stub=r"""
@@ -459,7 +500,8 @@ CELLS = [
     `RetinaHead(in_channels, num_anchors, num_classes, num_convs=4)`. Build two towers (`nn.Sequential`
     of conv + ReLU), a `cls_logits` conv with `A * C` outputs and a `bbox_pred` conv with `A * 4`
     outputs, initialise the classification bias to the prior, and make `forward(list of feature maps)`
-    return `(list of class maps, list of box maps)`.
+    return `(list of class maps, list of box maps)`: for an input level `(N, 256, H, W)` the class map
+    is `(N, A * C, H, W)` and the box map `(N, A * 4, H, W)`, one entry per level.
     """),
     exercise(
         stub=r"""
@@ -564,15 +606,29 @@ CELLS = [
     With cross-entropy the 49 000 easy negatives - each individually negligible - make up more than
     half of the loss. With focal loss their share drops below 1%: the loss now comes from the examples
     the network still gets wrong (here mostly hard negatives; the 20 positives are few, and $\alpha = 0.25$
-    deliberately down-weights them because $\gamma$ has already removed the competition). Compared with hard-negative mining / OHEM, nothing is thrown
-    away and there is no sorting step; the re-weighting is smooth.
-
+    deliberately down-weights them because $\gamma$ has already removed the competition). Compared with
+    hard-negative mining / OHEM (online hard example mining: keep only the highest-loss examples of
+    each batch), nothing is thrown away and there is no sorting step; the re-weighting is smooth.
+    """),
+    md(r"""
+    ### Lab · Focal loss
+    **Predict first:** 100 000 easy negatives at $p_t = 0.99$ against 20 positives at $p_t = 0.3$.
+    Under plain cross-entropy, roughly what share of the *total* loss comes from the easy
+    negatives? And with $\gamma = 2$? Check in the right half of the lab, then work through the
+    "Try this" list (5 minutes).
+    """),
+    code("""
+    labs.show("focal-loss")
+    """),
+    md(r"""
     ### Exercise 6 · focal loss in PyTorch
 
-    `focal_loss(logits, targets, gamma=2.0, alpha=0.25)` -> mean over all elements. Compute the
+    `focal_loss(logits, targets, gamma=2.0, alpha=0.25)` -> mean over all elements (a 0-d tensor).
+    `logits` and `targets` have the same shape; `targets` holds 0. / 1. floats. Compute the
     log term with `F.binary_cross_entropy_with_logits(..., reduction="none")` (stable for large
     logits), $p = \sigma(\text{logits})$, $p_t = p\,t + (1-p)(1-t)$, $\alpha_t = \alpha t + (1-\alpha)(1-t)$.
-    The checker compares with `torchvision.ops.sigmoid_focal_loss`.
+    The checker compares with `torchvision.ops.sigmoid_focal_loss`. For a single positive with
+    $p_t = 0.9$ your function returns the lab's FL for that marker, 2.63e-4.
     """),
     exercise(
         stub=r"""
@@ -665,6 +721,13 @@ CELLS = [
     axes[2].plot(px, py, "w*", ms=14, mec="k"); axes[2].set_title(f"CenterNet heat map: {len(px)} peaks = {len(fc_boxes)} objects")
     for ax in axes: ax.set_xlim(0, 128); ax.set_ylim(128, 0); ax.axis("off")
     plt.tight_layout(); plt.show()
+    """),
+    md(r"""
+    What to look at: centre-ness reaches 1 only at the box centre ($l = r$ and $t = b$), stays high
+    along the two centre lines (the bright cross) and fades to 0 at the border, so predictions from
+    border points are down-weighted at test time.
+    The CenterNet map has exactly one local maximum per object: the 3 x 3 max-pool test finds them
+    without any NMS.
     """),
 
     # ------------------------------------------------------------------ 7

@@ -53,7 +53,7 @@ CELLS = [
     import torch, torch.nn as nn, torch.nn.functional as F
     from torch.utils.data import DataLoader
     from torchvision.transforms import v2
-    from cvcourse import viz, tests, torchkit, day1
+    from cvcourse import viz, tests, torchkit, day1, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -120,7 +120,8 @@ CELLS = [
     md(r"""
     **Read the curves.** The training loss keeps falling steadily; the validation loss stops
     improving after about five epochs and only wobbles from then on, so the gap between the two
-    keeps opening (about +1.1 nats after 10 epochs). Train longer and the validation loss *rises*.
+    keeps opening (about +1.1 nats after 10 epochs; a nat is the unit of a loss computed with the
+    natural log). Train longer and the validation loss *rises*.
     The network is learning facts about *these 2 000 images* (backgrounds, poses, individual
     animals) rather than about breeds. On the CPU budget (64 px, 10 epochs) the plain run peaks
     around **12-16 %** (chance: 2.7 %); on a GPU at 128 px with 30 epochs it peaks at
@@ -161,6 +162,10 @@ CELLS = [
         ax.set_title(f"shuffle={shuffle}: distinct breeds per batch of 64 (mean {np.mean(n_cls):.1f})")
         ax.set_xlabel("batch index"); ax.grid(alpha=.3, axis="y")
     axes[0].set_ylabel("# breeds in the batch"); plt.tight_layout(); plt.show()
+    """),
+    md(r"""
+    Left: without shuffling, every batch of 64 holds only two or three breeds (54 images each).
+    Right: with shuffling, each batch holds about 30 of the 37 breeds.
     """),
     code(r"""
     # The pipeline used in section 1: deterministic resize -> float -> normalise
@@ -220,6 +225,11 @@ CELLS = [
         axes[0, c].set_title(name, fontsize=9)
     fig.suptitle(f"One training image ({classes[data['y_train'][11]]}), three random draws per augmentation", y=1.0)
     plt.tight_layout(); plt.show()
+    """),
+    md(r"""
+    Every column is the same source image, every row a new random draw. Compare the columns
+    that move pixels (crop, flip, rotation) with those that only change colours, and notice that
+    RandAugment and TrivialAugment pick a different operation on every draw.
     """),
     md(r"""
     ### What *not* to do
@@ -331,12 +341,22 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    ### Lab · Mixup and CutMix
+    **Predict first:** CutMix samples $\lambda = 0.75$ for a 128 px image. Is the pasted square
+    32 px or 64 px wide? Switch the lab to CutMix and set $\lambda$ to check, then drag the box
+    and work through the "Try this" list (5 minutes).
+    """),
+    code("""
+    labs.show("mixup-cutmix")
+    """),
+    md(r"""
     ### Exercise 2 · implement `mixup`
 
     `x` is a batch `(B, 3, H, W)`, `y` integer labels `(B,)`. Return the mixed batch and the soft
     labels `(B, num_classes)`. The scaffolding draws `lam` and a random permutation `perm` (pairing
     each image with another one of the same batch) unless they are given - the checker passes them
-    explicitly so it can compare numbers.
+    explicitly so it can compare numbers. In the lab's terms, `x` is image i, `x[perm]` image j,
+    and each row of the soft labels is the bar under the mixed image.
     """),
     exercise(
         stub=r"""
@@ -384,6 +404,11 @@ CELLS = [
     axes[1, 0].text(-12, 64, "CutMix", rotation=90, va="center", ha="right", fontsize=11)
     plt.suptitle("Mixed images and their soft labels (the target the loss sees)"); plt.tight_layout(); plt.show()
     """),
+    md(r"""
+    Top row: both animals are visible everywhere and the titles show 0.60 / 0.40, the fixed
+    $\lambda$. Bottom row: `v2.CutMix` drew its own $\lambda$ per batch and a random box; each
+    title's weights are the area shares of the two images, clipped boxes included, as in the lab.
+    """),
 
     # ------------------------------------------------------------------ 4
     md(r"""
@@ -400,8 +425,8 @@ CELLS = [
 
     **AdamW, not Adam + L2.** With plain Adam, an L2 penalty $\frac{\lambda}{2}\|w\|^2$ adds $\lambda w$ to the
     gradient, which is then divided by Adam's per-parameter scale $\sqrt{\hat v}$: weights with large
-    gradients get almost no decay. AdamW (Loshchilov & Hutter) *decouples* the decay from the
-    gradient statistics:
+    gradients get almost no decay. (Here $\lambda$ is the weight-decay coefficient, not Mixup's
+    $\lambda$.) AdamW (Loshchilov & Hutter) *decouples* the decay from the gradient statistics:
 
     $$w \leftarrow w - \eta \left( \frac{\hat m}{\sqrt{\hat v} + \epsilon} + \lambda w \right)$$
 
@@ -562,7 +587,19 @@ CELLS = [
     md(r"""
     Plain SGD has to keep its LR small enough not to diverge along the steep axis, so it crawls
     along the flat one. Momentum accumulates the consistent direction; Adam rescales each
-    coordinate. Neither removes the need for a good *learning-rate schedule*:
+    coordinate.
+
+    ### Lab · Optimizer playground
+    **Predict first:** on this ravine, plain SGD with $\eta = 0.9$ zig-zags but still converges.
+    What happens at $\eta = 1.1$: more zig-zag, or something else? And which of the three
+    optimisers survives the largest $\eta$? Drag the sliders to check, then work through the
+    "Try this" list (6 minutes).
+    """),
+    code("""
+    labs.show("optimizer-playground")
+    """),
+    md(r"""
+    Neither momentum nor Adam removes the need for a good *learning-rate schedule*:
 
     * **warm-up** (a few hundred to a few thousand steps from ~0 to the peak LR): early gradients
       are large and noisy, BN statistics and Adam's moment estimates are not settled yet;
@@ -571,11 +608,23 @@ CELLS = [
     * **OneCycle** (Smith): warm up to a high peak, anneal to far below the start, with momentum
       cycled inversely. Fast convergence in few epochs.
 
+    ### Lab · Learning-rate schedule designer
+    **Predict first:** the D1-01 convnet was trained with `torch.optim.lr_scheduler.OneCycleLR`.
+    At step 0, does it start at 0, at `max_lr / 25` or at `max_lr`? The lab opens with the
+    schedule of this notebook's recipe run (section 7); switch to one-cycle to check, then work
+    through the "Try this" list (4 minutes).
+    """),
+    code("""
+    labs.show("lr-schedule")
+    """),
+    md(r"""
     ### Exercise 4 · implement `warmup_cosine`
 
     `warmup_cosine(step, total, warmup, lr_max)`: for `step < warmup` rise linearly,
     `lr_max * (step + 1) / warmup`; afterwards cosine-decay from `lr_max` (at `step == warmup`)
-    to 0 (at `step == total`).
+    to 0 (at `step == total`). `step` runs from 0 to `total - 1`; return the learning rate as a
+    Python float. With "final LR / peak" at 0, the lab's formula box shows the value your
+    function must return for any step.
     """),
     exercise(
         stub=r"""
@@ -619,6 +668,12 @@ CELLS = [
         ax.plot(steps / spe, cv, color=c, lw=2 if "yours" in name else 1.4, label=name)
     ax.set_xlabel("epoch"); ax.set_ylabel("LR / peak LR"); ax.set_title("Learning-rate schedules over 20 epochs")
     ax.legend(fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0)); ax.grid(alpha=.3); plt.tight_layout(); plt.show()
+    """),
+    md(r"""
+    Your curve (thick) should rise for two epochs, then decay along a cosine that reaches 0 at
+    the same final step as the plain cosine.
+    The step schedule drops 10x twice; OneCycle (torch defaults: `pct_start=0.3`, both phases
+    cosine-shaped) starts at `max_lr / 25` and ends far below it.
     """),
     md(r"""
     ### The LR range test

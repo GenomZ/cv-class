@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Segmentation metrics</title>
+<meta name="lab-notebook" content="D3-01">
+<meta name="lab-summary" content="Paint a prediction mask over a ground truth and watch TP / FP / FN / TN, the confusion matrix, pixel accuracy, precision, recall, IoU and Dice move.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .sub { display: flex; flex-direction: column; gap: 12px; min-width: 0; flex: 1 1 250px; max-width: 310px; }
+  table.cm { border-collapse: separate; border-spacing: 3px; font-variant-numeric: tabular-nums; font-size: 12px; }
+  table.cm th { font-weight: 600; color: var(--ink-2); padding: 0 6px; text-align: center; font-size: 11.5px; }
+  table.cm th.r { text-align: right; }
+  table.cm td { width: 88px; height: 48px; border-radius: 6px; text-align: center; color: var(--ink); line-height: 1.2; }
+  table.cm th.top { font-weight: 400; color: var(--muted); padding-bottom: 0; }
+  table.cm td b { display: block; font-size: 18px; font-weight: 650; }
+  table.cm td span { font-size: 11px; color: var(--ink-2); }
+  .readouts .readout { min-width: 78px; flex: 1 1 78px; }
+  #note { min-height: 2.9em; }
+  #f-main { touch-action: none; cursor: crosshair; }
+  .cm-cap { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  #cap-main { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line: the grid must not move while you paint */
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Segmentation metrics</h1><span class="lab-tag">D3-01 · section 2</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">The ground truth is fixed; the prediction is yours: paint it (drag on the grid) or apply whole-mask operations.
+    Every pixel becomes a TP, FP, FN or TN, and every metric is computed from those four counts.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig" style="width:354px;max-width:100%"><figcaption id="cap-main">pixels</figcaption><div id="f-main"></div>
+          <div class="legend" id="legend" style="margin-top:6px"></div></figure>
+        <div class="sub">
+          <div>
+            <p class="lab-cap">confusion matrix <small>pixel counts, rows = truth, columns = prediction</small></p>
+            <table class="cm" id="cm"></table>
+            <div class="cm-cap" id="cm-cap"></div>
+          </div>
+          <figure class="lab-fig"><figcaption id="cap-curve">Dice vs IoU</figcaption><div id="f-curve"></div></figure>
+        </div>
+      </div>
+      <div class="formula" id="formula" style="margin-top:12px"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-gt"></div>
+      <div id="c-view"></div>
+      <div class="ctl"><span class="ctl-label">paint the prediction (drag on the grid)</span>
+        <div id="c-tool" class="lab-controls row" style="gap:8px 12px"></div></div>
+      <div class="ctl"><span class="ctl-label">whole-mask operations</span>
+        <div class="btn-row" id="c-ops"></div></div>
+      <div class="readouts" id="readouts"></div>
+      <p class="note" id="note"></p>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Pick <b>small object</b> and click <b>clear</b>: the model predicts background everywhere. Guess the pixel accuracy before you look.
+        <details><summary>why</summary><p>29 of 1024 pixels are object, so 995 are correct: accuracy 0.972 for a model that found nothing.
+          IoU and Dice of the object are 0, recall is 0, precision is 0/0 (undefined). Even mIoU over the two classes is 0.486, because
+          the background IoU (0.972) props it up. Accuracy is dominated by the largest class; report per-class IoU.</p></details></li>
+      <li>On <b>large object</b> click <b>copy GT</b>, then <b>shift &rarr;</b> once. How much IoU does one pixel cost? Now do the same on <b>thin structure</b>.
+        <details><summary>why</summary><p>The large blob loses only its left and right boundary columns: IoU about 0.9. The 2 px wide
+          vessel loses half of its width and gains the same amount next to it: TP = FP = FN, so IoU = 1/3. IoU measures error relative
+          to the object's size, so thin structures (vessels, roads, cracks, the Pet border class) are brutally sensitive to 1 px offsets.</p></details></li>
+      <li>Paint anything you like. Can you make Dice smaller than IoU? Watch the point on the curve.
+        <details><summary>why</summary><p>Never: Dice = 2TP / (2TP + FP + FN) and IoU = TP / (TP + FP + FN) give Dice = 2 IoU / (1 + IoU),
+          which is &ge; IoU with equality only at 0 and 1. Same pixels, same ranking per image; Dice just reads higher (IoU 0.5 = Dice 0.67).</p></details></li>
+      <li>On <b>two blobs</b>, copy GT, then erase the small blob completely with the eraser. Predict the IoU of the object class.
+        <details><summary>why</summary><p>About 0.88: a whole object is missing, yet the score is "good", because IoU over an image counts
+          pixels, and the big blob has most of them. Counting objects needs instance-level metrics (mask AP in D3-03) or per-object IoU.</p></details></li>
+      <li>On <b>small object</b> copy GT, then <b>dilate</b> twice; then copy GT and <b>erode</b> once. Which of precision / recall drops each time, and what does IoU do?
+        <details><summary>why</summary><p>Dilating only adds pixels: recall stays 1, precision falls (false alarms around the edge).
+          Eroding only removes pixels: precision stays 1, recall falls. IoU (and Dice) punish both, which is why they are the headline
+          metrics. On the thin structure one erosion deletes the whole prediction.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const N = 32, PX = 11;                                   // 32 x 32 pixel grid, 11 screen px per pixel
+  const S = Lab.params({ gt: "small", pred: "shift", view: "errors", tool: "brush", size: 1 });
+
+  // ---- ground-truth presets (pixel (r, c) has its centre at (r, c))
+  const PRESETS = {
+    small: { label: "small object (~3%)", f: (r, c) => (r - 21) ** 2 + (c - 12) ** 2 <= 9.5 },
+    large: { label: "large object", f: (r, c) => ((c - 15.5) / 11.5) ** 2 + ((r - 16) / 9.5) ** 2 <= 1 },
+    two: { label: "two blobs (big + small)", f: (r, c) => (r - 12) ** 2 + (c - 11) ** 2 <= 49.5 || (r - 24) ** 2 + (c - 25) ** 2 <= 5.5 },
+    thin: { label: "thin structure (2 px vessel)", f: (r, c) => { if (r < 3 || r > 28) return false; const c0 = Math.round(15 + 6 * Math.sin(r / 4.5)); return c === c0 || c === c0 + 1; } },
+  };
+  if (!PRESETS[S.gt]) S.gt = "small";
+  const makeGT = (name) => { const m = new Uint8Array(N * N); for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) m[r * N + c] = PRESETS[name].f(r, c) ? 1 : 0; return m; };
+
+  // ---- whole-mask operations (zero outside the grid, 4-neighbour cross like scipy.ndimage defaults)
+  const get = (m, r, c) => (r < 0 || c < 0 || r >= N || c >= N ? 0 : m[r * N + c]);
+  const shift = (m, dr, dc) => { const o = new Uint8Array(N * N); for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) o[r * N + c] = get(m, r - dr, c - dc); return o; };
+  const NB = [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]];
+  const dilate = (m) => { const o = new Uint8Array(N * N); for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) o[r * N + c] = NB.some(([a, b]) => get(m, r + a, c + b)) ? 1 : 0; return o; };
+  const erode = (m) => { const o = new Uint8Array(N * N); for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) o[r * N + c] = NB.every(([a, b]) => get(m, r + a, c + b)) ? 1 : 0; return o; };
+
+  let gt = makeGT(S.gt);
+  const INIT = { shift: () => shift(gt, 0, 1), "shift-down": () => shift(gt, 1, 0), copy: () => gt.slice(), clear: () => new Uint8Array(N * N),
+    dilate: () => dilate(gt), erode: () => erode(gt), all: () => new Uint8Array(N * N).fill(1) };
+  let pred = (INIT[S.pred] || INIT.shift)();
+  let hover = null;                                        // [r, c] under the pointer
+
+  // ---- figures
+  const cm = Lab.canvas("#f-main", N * PX, N * PX, { framed: true });
+  const cc = Lab.canvas("#f-curve", 264, 196);
+
+  // ---- controls
+  const opts = Object.entries(PRESETS).map(([value, p]) => ({ value, label: p.label }));
+  Lab.select("#c-gt", { label: "ground truth", options: opts, value: S.gt, onChange: (v) => { S.gt = v; gt = makeGT(v); pred = gt.slice(); redraw(); } });
+  Lab.segmented("#c-view", { label: "show", options: [{ value: "errors", label: "TP / FP / FN / TN" }, { value: "gt", label: "truth" }, { value: "pred", label: "prediction" }],
+    value: S.view, onChange: (v) => { S.view = v; redraw(); } });
+  Lab.segmented("#c-tool", { options: [{ value: "brush", label: "brush" }, { value: "eraser", label: "eraser" }], value: S.tool, onChange: (v) => { S.tool = v; } });
+  Lab.segmented("#c-tool", { options: [{ value: 1, label: "1 px" }, { value: 3, label: "3 px" }, { value: 5, label: "5 px" }], value: S.size, onChange: (v) => { S.size = v; redraw(); } });
+  const op = (text, fn) => Lab.button("#c-ops", text, () => { pred = fn(pred); redraw(); });
+  op("copy GT", () => gt.slice());
+  op("clear (all background)", () => new Uint8Array(N * N));
+  op("shift → 1 px", (m) => shift(m, 0, 1));
+  op("shift ↓ 1 px", (m) => shift(m, 1, 0));
+  op("dilate", dilate);
+  op("erode", erode);
+  const R = {};
+  for (const [k, label] of [["acc", "pixel accuracy"], ["prec", "precision"], ["rec", "recall"], ["iou", "IoU (object)"], ["dice", "Dice"], ["miou", "mIoU"]]) R[k] = Lab.readout("#readouts", label);
+
+  // ---- painting
+  const cellAt = (p) => [Lab.clamp(Math.floor(p.y / PX), 0, N - 1), Lab.clamp(Math.floor(p.x / PX), 0, N - 1)];
+  function stamp(r, c) {
+    const h = (S.size - 1) / 2, v = S.tool === "eraser" ? 0 : 1;
+    for (let a = -h; a <= h; a++) for (let b = -h; b <= h; b++) { const rr = r + a, cc_ = c + b; if (rr >= 0 && cc_ >= 0 && rr < N && cc_ < N) pred[rr * N + cc_] = v; }
+  }
+  let last = null;
+  function strokeTo(rc) {                                  // paint every cell on the segment from the last cell, so fast drags leave no gaps
+    if (!last) { stamp(...rc); last = rc; return; }
+    const n = Math.max(Math.abs(rc[0] - last[0]), Math.abs(rc[1] - last[1]), 1);
+    for (let t = 0; t <= n; t++) stamp(Math.round(Lab.lerp(last[0], rc[0], t / n)), Math.round(Lab.lerp(last[1], rc[1], t / n)));
+    last = rc;
+  }
+  Lab.pointer(cm, {
+    down: (p) => { last = null; hover = cellAt(p); strokeTo(hover); redraw(); },
+    move: (p) => { hover = cellAt(p); strokeTo(hover); redraw(); },
+    up: () => { last = null; },
+    hover: (p) => { hover = cellAt(p); redraw(); },
+    leave: () => { hover = null; redraw(); },
+  });
+
+  // ---- metrics (rows of the confusion matrix = truth, like cvcourse.seg.confusion_matrix)
+  function metrics() {
+    let tp = 0, fp = 0, fn = 0, tn = 0;
+    for (let i = 0; i < N * N; i++) { if (gt[i]) { if (pred[i]) tp++; else fn++; } else if (pred[i]) fp++; else tn++; }
+    const div = (a, b) => (b > 0 ? a / b : NaN);
+    const iou = div(tp, tp + fp + fn), iouBg = div(tn, tn + fp + fn);
+    return { tp, fp, fn, tn, n: N * N, acc: (tp + tn) / (N * N), prec: div(tp, tp + fp), rec: div(tp, tp + fn), iou, iouBg,
+      dice: (2 * tp + 1e-7) / (2 * tp + fp + fn + 1e-7),               // same eps as seg.dice_coefficient
+      miou: [iou, iouBg].filter((v) => !Number.isNaN(v)).reduce((a, b, _, arr) => a + b / arr.length, 0) };
+  }
+  const f3 = (v) => (Number.isNaN(v) ? "undefined" : v.toFixed(3));
+  // test hook (used by the verification scripts): draw now, then report the masks and what is displayed
+  window.labDebug = () => { draw(); return { gt: Array.from(gt), pred: Array.from(pred), m: metrics(), readouts: Object.fromEntries(Object.entries(R).map(([k, r]) => [k, r.el.querySelector(".v").textContent])) }; };
+
+  // ---- drawing
+  const ROLE = { tp: "--good", fp: "--bad", fn: "--c7", tn: null };
+  const NAMES = { tp: "TP hit", fp: "FP false alarm", fn: "FN missed", tn: "TN correct background" };
+  const kind = (i) => (gt[i] ? (pred[i] ? "tp" : "fn") : (pred[i] ? "fp" : "tn"));
+  function draw() {
+    const m = metrics();
+    const g = cm.ctx; cm.clear();
+    // cells
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+      const i = r * N + c;
+      let fill = null;
+      if (S.view === "errors") { const k = kind(i); fill = ROLE[k] && Lab.color(ROLE[k]); }
+      else if (S.view === "gt") fill = gt[i] ? Lab.color("--c3") : null;
+      else fill = pred[i] ? Lab.color("--c1") : null;
+      if (fill) { g.fillStyle = fill; g.fillRect(c * PX, r * PX, PX, PX); }
+    }
+    // grid
+    g.save(); g.strokeStyle = Lab.color("--grid"); g.lineWidth = 1; g.beginPath();
+    for (let k = 1; k < N; k++) { g.moveTo(k * PX + 0.5, 0); g.lineTo(k * PX + 0.5, N * PX); g.moveTo(0, k * PX + 0.5); g.lineTo(N * PX, k * PX + 0.5); }
+    g.stroke(); g.restore();
+    // in the prediction view, outline the truth so you can paint against it
+    if (S.view === "pred") {
+      g.save(); g.strokeStyle = Lab.color("--c3"); g.lineWidth = 2; g.beginPath();
+      for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+        if (!gt[r * N + c]) continue;
+        if (!get(gt, r - 1, c)) { g.moveTo(c * PX, r * PX); g.lineTo((c + 1) * PX, r * PX); }
+        if (!get(gt, r + 1, c)) { g.moveTo(c * PX, (r + 1) * PX); g.lineTo((c + 1) * PX, (r + 1) * PX); }
+        if (!get(gt, r, c - 1)) { g.moveTo(c * PX, r * PX); g.lineTo(c * PX, (r + 1) * PX); }
+        if (!get(gt, r, c + 1)) { g.moveTo((c + 1) * PX, r * PX); g.lineTo((c + 1) * PX, (r + 1) * PX); }
+      }
+      g.stroke(); g.restore();
+    }
+    // brush footprint under the pointer
+    if (hover) {
+      const h = (S.size - 1) / 2;
+      g.save(); g.strokeStyle = Lab.color("--hl"); g.lineWidth = 2;
+      g.strokeRect((hover[1] - h) * PX + 1, (hover[0] - h) * PX + 1, S.size * PX - 2, S.size * PX - 2); g.restore();
+      const i = hover[0] * N + hover[1], k = kind(i);
+      Lab.$("#cap-main").innerHTML = `pixel (${hover[0]}, ${hover[1]}) <small>truth ${gt[i] ? "object" : "bg"}, predicted ${pred[i] ? "object" : "bg"} &rarr; <b>${NAMES[k]}</b></small>`;
+    } else {
+      const lab = { errors: "every pixel is one of four cases", gt: "the ground truth (fixed)", pred: "your prediction; outline = ground truth" }[S.view];
+      Lab.$("#cap-main").innerHTML = `${N} x ${N} = ${N * N} pixels <small>${lab}</small>`;
+    }
+
+    // legend
+    if (S.view === "errors") {
+      Lab.$("#legend").innerHTML = ["tp", "fp", "fn", "tn"].map((k) => `<span><i style="background:${ROLE[k] ? Lab.color(ROLE[k]) : "transparent"};${ROLE[k] ? "" : "border:1px solid " + Lab.color("--axis")}"></i>${NAMES[k]} (${m[k]})</span>`).join("");
+    } else if (S.view === "gt") {
+      Lab.$("#legend").innerHTML = `<span><i style="background:${Lab.color("--c3")}"></i>ground truth: ${m.tp + m.fn} object pixels (${(100 * (m.tp + m.fn) / m.n).toFixed(1)}%)</span>`;
+    } else {
+      Lab.$("#legend").innerHTML = `<span><i style="background:${Lab.color("--c1")}"></i>prediction: ${m.tp + m.fp} pixels</span><span><i style="background:transparent;border:2px solid ${Lab.color("--c3")}"></i>ground truth outline</span>`;
+    }
+
+    // confusion matrix
+    const tile = (k, label) => `<td style="background:${ROLE[k] ? Lab.alpha(ROLE[k], 0.22) : Lab.color("--wash")};box-shadow:inset 0 0 0 1.5px ${ROLE[k] ? Lab.color(ROLE[k]) : Lab.color("--axis")}"><b>${m[k]}</b><span>${label}</span></td>`;
+    Lab.$("#cm").innerHTML = `<tr><th></th><th class="top" colspan="2">predicted</th></tr><tr><th></th><th>background</th><th>object</th></tr>` +
+      `<tr><th class="r">true<br>background</th>${tile("tn", "TN")}${tile("fp", "FP")}</tr>` +
+      `<tr><th class="r">true<br>object</th>${tile("fn", "FN")}${tile("tp", "TP")}</tr>`;
+    Lab.$("#cm-cap").textContent = `rows: ${m.tn + m.fp} + ${m.fn + m.tp} = ${m.n} pixels; column "object": ${m.tp + m.fp} predicted`;
+
+    // readouts
+    R.acc.set(f3(m.acc)); R.prec.set(Number.isNaN(m.prec) ? "0/0" : f3(m.prec)); R.rec.set(f3(m.rec));
+    R.iou.set(f3(m.iou)); R.dice.set(f3(m.dice)); R.miou.set(f3(m.miou));
+    let note = "";
+    if (m.tp + m.fp === 0) note = `Nothing predicted: the ${m.tn} background pixels alone give ${(100 * m.acc).toFixed(1)}% accuracy, while the object score is 0 and precision is 0/0.`;
+    else if (m.acc > 0.9 && m.iou < 0.5) note = `${(100 * m.acc).toFixed(1)}% of the pixels are right, yet less than half of the object region is shared (IoU ${m.iou.toFixed(2)}).`;
+    else if (m.fp === 0 && m.fn > 0) note = "No false alarms (precision 1), but object pixels are missed (recall < 1).";
+    else if (m.fn === 0 && m.fp > 0) note = "Every object pixel found (recall 1), but with false alarms (precision < 1).";
+    else if (m.fp === 0 && m.fn === 0) note = "Perfect: prediction = ground truth.";
+    else note = `${m.fp + m.fn} wrong pixels. Accuracy divides them by all ${m.n} pixels; IoU only by the ${m.tp + m.fp + m.fn} pixels of the union (TP + FP + FN).`;
+    Lab.$("#note").textContent = note;
+
+    // formulas with the numbers filled in
+    const row = (name, f, nums, v) => `${name.padEnd(15)}= ${f.padEnd(23)}= ${nums.padEnd(23)}= <b>${f3(v)}</b>`;
+    Lab.$("#formula").innerHTML = [
+      row("pixel accuracy", "(TP + TN) / N", `(${m.tp} + ${m.tn}) / ${m.n}`, m.acc),
+      row("precision", "TP / (TP + FP)", `${m.tp} / (${m.tp} + ${m.fp})`, m.prec),
+      row("recall", "TP / (TP + FN)", `${m.tp} / (${m.tp} + ${m.fn})`, m.rec),
+      row("IoU (object)", "TP / (TP + FP + FN)", `${m.tp} / (${m.tp} + ${m.fp} + ${m.fn})`, m.iou),
+      row("Dice", "2TP / (2TP + FP + FN)", `${2 * m.tp} / (${2 * m.tp} + ${m.fp} + ${m.fn})`, m.dice),
+      row("IoU (bg)", "TN / (TN + FP + FN)", `${m.tn} / (${m.tn} + ${m.fp} + ${m.fn})`, m.iouBg),
+      `${"mIoU".padEnd(15)}= (IoU(bg) + IoU(object)) / 2 = (${f3(m.iouBg)} + ${f3(m.iou)}) / 2 = <b>${f3(m.miou)}</b>`,
+    ].join("\n");
+
+    // Dice = 2 IoU / (1 + IoU) with the current point
+    const h = cc.ctx; cc.clear();
+    const ax = Lab.axes(h, { x: 50, y: 8, w: 204, h: 146, xmin: 0, xmax: 1, ymin: 0, ymax: 1, xlabel: "IoU", ylabel: "Dice", xticks: [0, 0.25, 0.5, 0.75, 1], yticks: [0, 0.5, 1] });
+    ax.line([[0, 0], [1, 1]], Lab.color("--muted"), 1.5, [4, 4]);
+    ax.line(Array.from({ length: 51 }, (_, k) => { const i = k / 50; return [i, (2 * i) / (1 + i)]; }), Lab.color("--c1"), 2);
+    Lab.text(h, "Dice = 2 IoU / (1 + IoU)", ax.sx(0.03), ax.sy(0.9), { size: 11, color: Lab.color("--ink-2") });
+    Lab.text(h, "dashed: Dice = IoU", ax.sx(0.98), ax.sy(0.05), { size: 11, color: Lab.color("--muted"), align: "right" });
+    if (!Number.isNaN(m.iou)) {
+      ax.dot(m.iou, m.dice, Lab.color("--hl"), 5.5);
+    }
+    Lab.$("#cap-curve").innerHTML = `Dice vs IoU <small>dot = your prediction: IoU ${f3(m.iou)} &rarr; Dice ${f3(m.dice)}</small>`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

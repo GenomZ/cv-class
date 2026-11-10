@@ -39,7 +39,7 @@ CELLS = [
     import numpy as np
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
-    from cvcourse import viz, convops, tests
+    from cvcourse import viz, convops, tests, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -128,6 +128,11 @@ CELLS = [
     fig.suptitle("Sliding the 3x3 kernel over the 5x5 input: 9 positions -> 3x3 output", y=1.01)
     plt.tight_layout(); plt.show()
     """),
+    md(r"""
+    Each pair of panels is one output position: the red window on the input, and the output
+    filled in so far. Check the first one by hand: the kernel's `+1` column sits on `1, 0, 3`
+    and its `-1` column on `0, 2, 1`, so `out[0, 0] = (1 + 0 + 3) - (0 + 2 + 1) = 1`.
+    """),
     code("""
     # Same thing as an animation (self-contained HTML, no extra packages)
     from matplotlib.animation import FuncAnimation
@@ -154,13 +159,25 @@ CELLS = [
     plt.close(fig)
     HTML(anim.to_jshtml())
     """),
+    md(r"""
+    ### Lab · Convolution playground
+    **Predict first:** the kernel above has `+1` in its left column and `-1` in its right column.
+    Where the photo goes from dark (left) to bright (right), is its output positive or negative?
+    In the lab, pick **sobel x** (its columns are the other way round), hover such an edge to
+    check, then work through the "Try this" list under the lab (5 minutes).
+    """),
+    code("""
+    labs.show("conv-playground")
+    """),
 
     md(r"""
     ### Exercise 1 · implement `cross_correlate2d`
 
     Write the function for a single-channel input `x (H, W)` and kernel `k (kh, kw)`, with
     `stride` and zero-`pad` arguments. Use the formula above; two `for` loops over output
-    positions are fine. You may use `convops.pad2d(x, pad)` for the padding.
+    positions are fine. You may use `convops.pad2d(x, pad)` for the padding. Return a float
+    array of shape `(Ho, Wo)`; note that in the stub `H, W` are measured *after* padding, so
+    `Ho = (H - kh) // stride + 1` (the output-size formula of section 4).
     """),
     exercise(
         stub="""
@@ -251,6 +268,19 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Read the sizes in the titles and check them with the formula: valid
+    $\lfloor (8 - 3)/1 \rfloor + 1 = 6$, same $\lfloor (8 + 2 - 3)/1 \rfloor + 1 = 8$, stride 2
+    $\lfloor (8 + 2 - 3)/2 \rfloor + 1 = 4$.
+
+    ### Lab · stride, padding and dilation
+    **Predict first:** the playground's photo is 64 x 64. With a 3x3 kernel, stride 2 and no
+    padding, is the output 32 x 32 or 31 x 31? Then run the cell: the lab starts in exactly that
+    setting, with the formula box filled in. Try padding 1 and dilation 2 as well (2 minutes).
+    """),
+    code("""
+    labs.show("conv-playground", stride=2, pad=0)
+    """),
+    md(r"""
     ### Exercise 2 · output-size formula
 
     Implement `conv_output_size(n_in, k, stride, pad, dilation)` and pass the checker. Then
@@ -287,7 +317,9 @@ CELLS = [
     so **every output channel sees every input channel**. The parameter count is
     $C_{\text{out}} \cdot C_{\text{in}} \cdot k_h \cdot k_w + C_{\text{out}}$ and it does **not**
     depend on the image size - that is the weight sharing that makes convnets cheap and
-    translation-equivariant. The *compute* does depend on the image:
+    translation-equivariant (shift the input and the output shifts the same way). The *compute*
+    does depend on the image. It is counted in MACs (multiply-accumulate operations, one
+    `a * b + c` each; 1 MAC = 2 FLOPs):
     $\text{MACs} = C_{\text{out}} \cdot H_{\text{out}} \cdot W_{\text{out}} \cdot C_{\text{in}} \cdot k_h \cdot k_w$.
     """),
     code("""
@@ -313,8 +345,10 @@ CELLS = [
     md(r"""
     ### Exercise 3 · multi-channel `conv2d`
 
-    `x` is `(C_in, H, W)`, `w` is `(C_out, C_in, kh, kw)`, `b` is `(C_out,)`. Return
-    `(C_out, Ho, Wo)`. Reuse the padding helper and loop over output channels and positions.
+    `x` is `(C_in, H, W)`, `w` is `(C_out, C_in, kh, kw)`, `b` is `(C_out,)` or `None`. Return
+    `(C_out, Ho, Wo)` with `Ho, Wo` from the output-size formula (no dilation here). Reuse the
+    padding helper and loop over output channels and positions; when `b` is given, add `b[o]`
+    to every position of output channel `o`.
     """),
     exercise(
         stub="""
@@ -418,11 +452,26 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    The red pixel is one unit of the last layer. Left: it reads the orange 3x3 window of the
+    layer below, and each of those nine units reads its own 3x3 window of the input, which
+    together cover the blue 5x5 square. Right: one 5x5 kernel reads the same square directly.
+
+    ### Lab · Receptive field explorer
+    **Predict first:** stack conv 3x3, then maxpool 2, then conv 3x3. Is the receptive field of
+    one unit of the last layer 7, 8 or 9 pixels wide? Build the stack in the lab (**clear**, then
+    add the three layers), click a top unit to check, then work through the "Try this" list (5 minutes).
+    """),
+    code("""
+    labs.show("receptive-field")
+    """),
+    md(r"""
     ### Exercise 5 · receptive field of a VGG-style stack
 
     Implement `receptive_field(layers)` where `layers` is a list of `(kernel, stride, pad)`
     tuples. Return a list of dicts with at least the key `"rf"` per layer (the checker reads
-    the last one). Then plot the growth for the stack below.
+    the last one); `rf` and `jump` are the `r` and `j` columns of the lab's table. Padding does
+    not change the size of the receptive field, only where it sits, so `p` is unused here. Then
+    plot the growth for the stack below.
     """),
     exercise(
         stub="""
@@ -463,6 +512,11 @@ CELLS = [
         if vgg_like[i][0] == "pool": ax.annotate(f"jump {d['jump']}", (i, d["rf"]), textcoords="offset points", xytext=(0, 8), fontsize=7, ha="center")
     plt.tight_layout(); plt.show()
     print("final receptive field:", rfs[-1]["rf"], "px  (input is 224 px)")
+    """),
+    md(r"""
+    Each pool doubles the jump, so every 3x3 after it adds twice as many pixels as before: the
+    slope of the curve doubles after every pool. Thirteen 3x3 layers and five pools end at 212 px,
+    so a unit of the last block sees almost the whole 224 px image.
     """),
 
     # ------------------------------------------------------------------ 7
@@ -658,8 +712,8 @@ CELLS = [
     md(r"""
     **Training.** Two epochs of AdamW, capped at three minutes. The learning rate follows a
     *one-cycle* schedule: it warms up to a peak and then anneals to almost zero, which gets
-    much more out of two epochs than a constant rate (81% instead of 90% for this net; the
-    why is in D1-02). The trained weights are saved to `data/checkpoints/`; when the file
+    much more out of two epochs than a constant rate (about 90% instead of 81% with a constant
+    rate, for this net; the why is in D1-02). The trained weights are saved to `data/checkpoints/`; when the file
     exists, the cell loads it instead of training, so re-running the notebook is instant
     (delete the file to retrain).
 

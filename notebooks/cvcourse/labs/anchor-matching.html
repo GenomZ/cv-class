@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anchor matching</title>
+<meta name="lab-notebook" content="D2-02">
+<meta name="lab-summary" content="Drag ground-truth boxes over a grid of anchors and watch the IoU rule label each anchor positive, ignored or negative. Stride, scales, ratios, thresholds, low-quality matches.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .side { width: 250px; max-width: 100%; display: flex; flex-direction: column; gap: 10px; }
+  /* narrower pages (e.g. a notebook column): the side panel drops below the image, so lay its parts out in a row */
+  @media (max-width: 1087px) { .side { width: auto; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 10px 14px; } .side > * { width: 250px; max-width: 100%; } }
+  .side .readout { min-width: 72px; padding: 5px 9px; }
+  .side .readout .v { font-size: 16px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chips button {
+    font: inherit; font-size: 12.5px; color: var(--ink-2); background: transparent; border: 1px solid var(--axis);
+    border-radius: 999px; padding: 2px 9px; cursor: pointer; font-variant-numeric: tabular-nums;
+  }
+  .chips button:hover { background: var(--wash); }
+  .chips button[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .under { margin-top: 6px; }
+  button.btn:disabled { opacity: 0.45; cursor: default; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Anchor matching</h1><span class="lab-tag">D2-02 · sections 1-2</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Every feature-map cell carries the same family of anchors. Each anchor gets a training label from its best IoU
+    with any ground-truth box: positive, ignored or negative. Drag or resize the boxes, hover a cell to see its anchors,
+    and change the anchor generator.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig" style="width: 434px; max-width: 100%"><figcaption id="cap-img">image</figcaption><div id="fig-img"></div>
+          <div class="legend under" id="legend"></div></figure>
+        <div class="side">
+          <div class="readouts" id="readouts"></div>
+          <figure class="lab-fig"><figcaption>max IoU of every anchor <small>count, log scale</small></figcaption><div id="fig-hist"></div></figure>
+          <figure class="lab-fig"><figcaption id="cap-fam">anchors of one cell</figcaption><div id="fig-fam"></div></figure>
+        </div>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-gen" class="lab-controls"></div>
+      <div id="c-match" class="lab-controls"></div>
+      <div class="btn-row" id="c-boxes"></div>
+      <div class="formula" id="formula"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Before reading the tiles: two objects, 2304 anchors. How many anchors are positive, and what is the positive : negative ratio?
+        <details><summary>why it matters</summary><p>6 positives against 2169 negatives, about 1 : 360. A loss averaged over all anchors would
+          be won by "always background". The RPN therefore samples 256 anchors per image with at most half positives
+          (here: 6 positives + 250 negatives); one-stage detectors use all anchors and fix the imbalance with focal loss (D2-03).</p></details></li>
+      <li>Untick <b>allow low-quality matches</b>. How many positive anchors does the small box (GT 2) keep?
+        <details><summary>answer</summary><p>None: its best anchor has IoU 0.45, far below 0.7, so the RPN would never be trained to propose
+          this object. The low-quality rule makes the best anchor of every GT positive anyway (the "forced" chip): a weak target,
+          but better than none. Hover its cell: even the smallest 32 px anchor is much larger than the 20 x 24 px object.</p></details></li>
+      <li>With low-quality matches off, switch the stride from 16 to 32 and to 64. Predict what happens to the anchor count and to GT 1's positives.
+        <details><summary>why</summary><p>The count drops 4x per step (2304, 576, 144): it is (H/s)(W/s)A. Fewer centres means the nearest
+          centre can be up to s/2 away from the object's centre, so the best IoU drops and GT 1 keeps a single positive.
+          Stride 8 does the opposite: 9216 anchors, 18 positives for GT 1.</p></details></li>
+      <li>Rescue the small box without the low-quality rule: which <b>scale</b> chip and which <b>stride</b> give it a real positive (IoU &ge; 0.7)? What does it cost?
+        <details><summary>answer</summary><p>It needs an anchor of its own size (add 24) <i>and</i> a centre close enough to its centre
+          (stride 8): then it gets a real positive (IoU 0.71). The price: A goes from 9 to 12 and the anchor count from 9216 to 12288,
+          almost all of them extra negatives. This is why FPN (D2-03) puts small anchors only on the fine levels.</p></details></li>
+      <li>Drag the positive threshold down to 0.5 (what the notebook uses for its 128 px images). Then set the negative threshold equal to it. What disappears?
+        <details><summary>why</summary><p>At 0.5 the positives jump from 6 to 44: 0.7 assumes objects that are large compared with the stride.
+          With both thresholds equal the ignore band vanishes, so anchors that half-cover an object are trained as background
+          or as foreground by a coin flip of 0.01 IoU. Faster R-CNN leaves them out of the loss instead.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+/* MATHS-BEGIN: pure functions, mirror cvcourse.boxes.make_anchors / box_iou / match_anchors exactly (same order, same tie-breaking) */
+const AM = (() => {
+  /** (fh * fw * A) anchors as a flat xyxy array, cell-major (row, col, anchor); anchor a = scale index * nRatios + ratio index. */
+  function makeAnchors(fh, fw, stride, scales, ratios) {
+    const ws = [], hs = [];
+    for (const s of scales) for (const r of ratios) { ws.push(s / Math.sqrt(r)); hs.push(s * Math.sqrt(r)); }
+    const A = ws.length, out = new Float64Array(fh * fw * A * 4);
+    let k = 0;
+    for (let i = 0; i < fh; i++) for (let j = 0; j < fw; j++) {
+      const cx = (j + 0.5) * stride, cy = (i + 0.5) * stride;
+      for (let a = 0; a < A; a++) { out[k++] = cx + -ws[a] / 2; out[k++] = cy + -hs[a] / 2; out[k++] = cx + ws[a] / 2; out[k++] = cy + hs[a] / 2; }
+    }
+    return out;
+  }
+  const area = (x1, y1, x2, y2) => Math.max(x2 - x1, 0) * Math.max(y2 - y1, 0);
+  function iou(a, k, g) {
+    const ax1 = a[4 * k], ay1 = a[4 * k + 1], ax2 = a[4 * k + 2], ay2 = a[4 * k + 3];
+    const iw = Math.max(Math.min(ax2, g[2]) - Math.max(ax1, g[0]), 0), ih = Math.max(Math.min(ay2, g[3]) - Math.max(ay1, g[1]), 0);
+    const inter = iw * ih, union = area(ax1, ay1, ax2, ay2) + area(g[0], g[1], g[2], g[3]) - inter;
+    return union > 0 ? inter / Math.max(union, 1e-12) : 0;
+  }
+  /** labels: 1 positive, 0 negative, -1 ignore; bestGt: matched GT index; forced: positive only through the low-quality rule. */
+  function match(anchors, gts, pos, neg, lowq) {
+    const N = anchors.length / 4, G = gts.length;
+    const ious = new Float64Array(N * G), bestIou = new Float64Array(N), bestGt = new Int32Array(N), labels = new Int8Array(N), forced = new Uint8Array(N);
+    if (!G) return { ious, bestIou, bestGt, labels, forced, bestAnchor: [] };
+    for (let n = 0; n < N; n++) {
+      let bi = -1, bg = 0;
+      for (let g = 0; g < G; g++) { const v = iou(anchors, n, gts[g]); ious[n * G + g] = v; if (v > bi) { bi = v; bg = g; } }
+      bestIou[n] = bi; bestGt[n] = bg;
+      labels[n] = bi >= pos ? 1 : bi < neg ? 0 : -1;    // negatives first, then positives overwrite (as in boxes.match_anchors)
+    }
+    const bestAnchor = [];
+    for (let g = 0; g < G; g++) {
+      let bn = 0, bv = -1;
+      for (let n = 0; n < N; n++) if (ious[n * G + g] > bv) { bv = ious[n * G + g]; bn = n; }
+      bestAnchor.push(bn);
+    }
+    if (lowq) bestAnchor.forEach((n, g) => { if (labels[n] !== 1) forced[n] = 1; labels[n] = 1; bestGt[n] = g; });
+    return { ious, bestIou, bestGt, labels, forced, bestAnchor };
+  }
+  return { makeAnchors, iou, match };
+})();
+/* MATHS-END */
+
+(() => {
+  const IMG = 256, CW = 432, Z = CW / IMG;          // image pixels -> canvas units
+  const SCALE_CHOICES = [16, 24, 32, 48, 64, 96, 128];
+  const RATIO_CHOICES = [1 / 3, 0.5, 1, 2, 3];
+  const RATIO_LABEL = (r) => (Math.abs(r - 1 / 3) < 1e-9 ? "1/3" : Math.abs(r - 0.5) < 1e-9 ? "1/2" : String(+r.toFixed(3)));
+  const S = Lab.params({ stride: 16, scales: "32,64,128", ratios: "0.5,1,2", pos: 0.7, neg: 0.3, lowq: true,
+                         showign: false, showneg: false, gts: "44,40,164,164;176,182,196,206", sel: 1, hr: -1, hc: -1 });
+  const num = (t) => { t = t.trim(); if (t.includes("/")) { const [a, b] = t.split("/"); return Number(a) / Number(b); } return Number(t); };
+  const parseList = (s) => s.split(",").map(num).filter((v) => Number.isFinite(v) && v > 0);
+  const near = (list, v) => list.some((x) => Math.abs(x - v) < 1e-6);
+  let scales = parseList(S.scales); if (!scales.length) scales = [32, 64, 128];
+  let ratios = parseList(S.ratios); if (!ratios.length) ratios = [0.5, 1, 2];
+  const scaleSet = [...SCALE_CHOICES, ...scales.filter((v) => !near(SCALE_CHOICES, v))].sort((a, b) => a - b);
+  const ratioSet = [...RATIO_CHOICES, ...ratios.filter((v) => !near(RATIO_CHOICES, v))].sort((a, b) => a - b);
+  let gts = S.gts.split(";").map((t) => t.split(",").map(Number)).filter((b) => b.length === 4 && b.every(Number.isFinite) && b[2] > b[0] && b[3] > b[1]).slice(0, 3);
+  if (!gts.length) gts = [[44, 40, 164, 164]];
+  S.sel = Lab.clamp(Math.round(S.sel), 0, gts.length - 1);
+  if (![8, 16, 32, 64].includes(S.stride)) S.stride = 16;
+
+  const cimg = Lab.canvas("#fig-img", CW, CW, { framed: true });
+  const chist = Lab.canvas("#fig-hist", 250, 150);
+  const cfam = Lab.canvas("#fig-fam", 250, 150);
+
+  // ---- controls
+  Lab.segmented("#c-gen", { label: "stride s (image pixels per feature cell)", options: [8, 16, 32, 64], value: S.stride, onChange: (v) => { S.stride = v; redraw(); } });
+  function chipGroup(parent, label, set, chosen, fmt, onChange) {
+    const wrap = Lab.el("div", { class: "ctl" }, Lab.el("span", { class: "ctl-label", text: label }));
+    const row = Lab.el("div", { class: "chips", role: "group", "aria-label": label });
+    set.forEach((v) => {
+      const b = Lab.el("button", { type: "button", text: fmt(v) });
+      const paint = () => b.setAttribute("aria-pressed", String(near(chosen(), v)));
+      b.addEventListener("click", () => {
+        const cur = chosen();
+        const next = near(cur, v) ? cur.filter((x) => Math.abs(x - v) > 1e-6) : [...cur, v].sort((a, c) => a - c);
+        if (!next.length) return;                       // keep at least one
+        onChange(next); row.querySelectorAll("button").forEach((x) => x.dispatchEvent(new Event("paint")));
+      });
+      b.addEventListener("paint", paint); paint(); row.append(b);
+    });
+    wrap.append(row); Lab.$(parent).append(wrap);
+  }
+  chipGroup("#c-gen", "scales (side of the square anchor, px)", scaleSet, () => scales, String, (v) => { scales = v; redraw(); });
+  chipGroup("#c-gen", "aspect ratios r = h / w", ratioSet, () => ratios, RATIO_LABEL, (v) => { ratios = v; redraw(); });
+  const sPos = Lab.slider("#c-match", { label: "positive if max IoU ≥", min: 0.05, max: 0.95, step: 0.05, value: S.pos, fmt: (v) => v.toFixed(2),
+    onInput: (v) => { S.pos = v; if (S.neg > v) { S.neg = v; sNeg.set(v); } redraw(); } });
+  const sNeg = Lab.slider("#c-match", { label: "negative if max IoU <", min: 0.05, max: 0.95, step: 0.05, value: S.neg, fmt: (v) => v.toFixed(2),
+    onInput: (v) => { S.neg = v; if (S.pos < v) { S.pos = v; sPos.set(v); } redraw(); } });
+  Lab.toggle("#c-match", { label: "allow low-quality matches (the best anchor of every GT is always positive)", value: S.lowq, onChange: (v) => { S.lowq = v; redraw(); } });
+  Lab.toggle("#c-match", { label: "draw ignored anchors", value: S.showign, onChange: (v) => { S.showign = v; redraw(); } });
+  Lab.toggle("#c-match", { label: "draw negative anchors", value: S.showneg, onChange: (v) => { S.showneg = v; redraw(); } });
+  const bAdd = Lab.button("#c-boxes", "add box", () => {
+    if (gts.length >= 3) return;
+    const cands = [[150, 60, 230, 110], [24, 186, 84, 236], [100, 120, 150, 230], [190, 20, 240, 70]];
+    let best = cands[0], bestOv = Infinity;
+    for (const c of cands) { const ov = Math.max(...gts.map((g) => AM.iou(new Float64Array(c), 0, g))); if (ov < bestOv) { bestOv = ov; best = c; } }
+    gts.push(best.slice()); S.sel = gts.length - 1; redraw();
+  });
+  const bDel = Lab.button("#c-boxes", "remove selected box", () => { if (gts.length > 1) { gts.splice(S.sel, 1); S.sel = Math.min(S.sel, gts.length - 1); redraw(); } });
+
+  const rN = Lab.readout("#readouts", "anchors"), rP = Lab.readout("#readouts", "positive"), rI = Lab.readout("#readouts", "ignored"),
+        rG = Lab.readout("#readouts", "negative"), rR = Lab.readout("#readouts", "pos : neg");
+
+  // ---- pointer: drag / resize GT boxes, hover a cell
+  let drag = null;
+  const toImg = (p) => ({ x: p.x / Z, y: p.y / Z });
+  function hit(p) {
+    const q = toImg(p), tol = 8 / Z;
+    const order = [S.sel, ...gts.map((_, i) => i).filter((i) => i !== S.sel)];
+    for (const g of order) {
+      const [x1, y1, x2, y2] = gts[g];
+      const nx1 = Math.abs(q.x - x1) < tol, nx2 = Math.abs(q.x - x2) < tol, ny1 = Math.abs(q.y - y1) < tol, ny2 = Math.abs(q.y - y2) < tol;
+      const inX = q.x > x1 - tol && q.x < x2 + tol, inY = q.y > y1 - tol && q.y < y2 + tol;
+      if (!(inX && inY)) continue;
+      const mode = (ny1 ? "n" : ny2 ? "s" : "") + (nx1 ? "w" : nx2 ? "e" : "");
+      return { g, mode: mode || "move" };
+    }
+    return null;
+  }
+  const CURSOR = { move: "move", n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize" };
+  Lab.pointer(cimg, {
+    down(p) {
+      const h = hit(p);
+      if (!h) { drag = null; return; }
+      S.sel = h.g; drag = { ...h, start: toImg(p), orig: gts[h.g].slice() }; S.hr = S.hc = -1; redraw();
+    },
+    move(p) {
+      if (!drag) return;
+      const q = toImg(p), dx = q.x - drag.start.x, dy = q.y - drag.start.y, o = drag.orig, b = gts[drag.g], MIN = 4;
+      if (drag.mode === "move") {
+        const w = o[2] - o[0], h = o[3] - o[1];
+        b[0] = Math.round(Lab.clamp(o[0] + dx, 0, IMG - w)); b[1] = Math.round(Lab.clamp(o[1] + dy, 0, IMG - h)); b[2] = b[0] + w; b[3] = b[1] + h;
+      } else {
+        if (drag.mode.includes("w")) b[0] = Math.round(Lab.clamp(o[0] + dx, 0, o[2] - MIN));
+        if (drag.mode.includes("e")) b[2] = Math.round(Lab.clamp(o[2] + dx, o[0] + MIN, IMG));
+        if (drag.mode.includes("n")) b[1] = Math.round(Lab.clamp(o[1] + dy, 0, o[3] - MIN));
+        if (drag.mode.includes("s")) b[3] = Math.round(Lab.clamp(o[3] + dy, o[1] + MIN, IMG));
+      }
+      redraw();
+    },
+    up() { drag = null; redraw(); },
+    hover(p) {
+      const h = hit(p); cimg.canvas.style.cursor = h ? CURSOR[h.mode] : "crosshair";
+      const q = toImg(p);
+      S.hr = Lab.clamp(Math.floor(q.y / S.stride), 0, IMG / S.stride - 1); S.hc = Lab.clamp(Math.floor(q.x / S.stride), 0, IMG / S.stride - 1); redraw();
+    },
+    leave() { S.hr = S.hc = -1; redraw(); },
+  });
+
+  // ---- drawing helpers
+  function chip(ctx, text, x, y, bg, placed) {
+    ctx.save(); ctx.font = '600 10.5px system-ui, -apple-system, "Segoe UI", sans-serif';
+    const w = ctx.measureText(text).width + 8, h = 15;
+    x = Lab.clamp(x, 0, CW - w); y = Lab.clamp(y, 0, CW - h);
+    const r = [x, y, x + w, y + h];
+    if (placed) { if (placed.some((o) => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1])) { ctx.restore(); return false; } placed.push(r); }
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(x, y, w, h, 3); ctx.fill();
+    ctx.fillStyle = Lab.inkOn(Lab.rgb(bg)); ctx.textBaseline = "middle"; ctx.fillText(text, x + 4, y + h / 2 + 0.5);
+    ctx.restore(); return true;
+  }
+  const mixRGB = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  const rect = (ctx, b) => ctx.rect(b[0] * Z, b[1] * Z, (b[2] - b[0]) * Z, (b[3] - b[1]) * Z);
+  const anchorAt = (anc, k) => [anc[4 * k], anc[4 * k + 1], anc[4 * k + 2], anc[4 * k + 3]];
+
+  function draw() {
+    const st = S.stride, nf = IMG / st, R = ratios.length, A = scales.length * R;
+    const anc = AM.makeAnchors(nf, nf, st, scales, ratios), N = anc.length / 4;
+    const m = AM.match(anc, gts, S.pos, S.neg, S.lowq);
+    let nP = 0, nI = 0, nG = 0;
+    for (let n = 0; n < N; n++) { if (m.labels[n] === 1) nP++; else if (m.labels[n] === 0) nG++; else nI++; }
+    const perGt = gts.map((_, g) => { let c = 0; for (let n = 0; n < N; n++) if (m.labels[n] === 1 && m.bestGt[n] === g) c++; return c; });
+    const good = Lab.color("--good"), bad = Lab.color("--bad"), muted = Lab.color("--muted"), c3 = Lab.color("--c3"), hl = Lab.color("--hl");
+
+    // hovered cell, or (auto) the cell holding the best anchor of the selected GT
+    let hr = S.hr, hc = S.hc, auto = false;
+    if (hr < 0 || hc < 0 || hr >= nf || hc >= nf) { const cell = Math.floor(m.bestAnchor[S.sel] / A); hr = Math.floor(cell / nf); hc = cell % nf; auto = true; }
+    const cellIdx = hr * nf + hc;
+
+    // ---- image
+    const g = cimg.ctx; cimg.clear();
+    g.save();
+    g.fillStyle = Lab.color("--wash"); g.fillRect(0, 0, CW, CW);
+    g.strokeStyle = Lab.color("--grid"); g.lineWidth = 1; g.beginPath();
+    for (let k = 1; k < nf; k++) { const v = Math.round(k * st * Z) + 0.5; g.moveTo(v, 0); g.lineTo(v, CW); g.moveTo(0, v); g.lineTo(CW, v); }
+    g.stroke();
+    gts.forEach((b) => { g.fillStyle = Lab.alpha("--c3", 0.13); g.fillRect(b[0] * Z, b[1] * Z, (b[2] - b[0]) * Z, (b[3] - b[1]) * Z); });
+    if (S.showneg) {
+      g.strokeStyle = Lab.alpha("--bad", 0.07); g.lineWidth = 1; g.beginPath();
+      for (let n = 0; n < N; n++) if (m.labels[n] === 0) rect(g, anchorAt(anc, n));
+      g.stroke();
+    }
+    if (S.showign) {
+      g.strokeStyle = Lab.alpha("--muted", 0.45); g.lineWidth = 1; g.setLineDash([3, 3]); g.beginPath();
+      for (let n = 0; n < N; n++) if (m.labels[n] === -1) rect(g, anchorAt(anc, n));
+      g.stroke(); g.setLineDash([]);
+    }
+    // centre dots, coloured by the best label among the cell's anchors
+    const cellLab = new Int8Array(nf * nf).fill(0);
+    for (let n = 0; n < N; n++) { const c = Math.floor(n / A); if (m.labels[n] === 1) cellLab[c] = 2; else if (m.labels[n] === -1 && cellLab[c] < 1) cellLab[c] = 1; }
+    for (const [lv, col, r] of [[0, Lab.alpha("--bad", 0.55), 1.4], [1, muted, 2.2], [2, good, 3.4]]) {
+      g.fillStyle = col; g.beginPath();
+      for (let c = 0; c < nf * nf; c++) if (cellLab[c] === lv) { const x = ((c % nf) + 0.5) * st * Z, y = (Math.floor(c / nf) + 0.5) * st * Z; g.moveTo(x + r, y); g.arc(x, y, r, 0, 2 * Math.PI); }
+      g.fill();
+    }
+    // positive anchors
+    const placed = [];
+    const posList = [];
+    for (let n = 0; n < N; n++) if (m.labels[n] === 1) posList.push(n);
+    g.strokeStyle = good; g.lineWidth = 1.6;
+    for (const n of posList) { const b = anchorAt(anc, n); g.setLineDash(m.forced[n] ? [5, 3] : []); g.beginPath(); rect(g, b); g.stroke(); }
+    g.setLineDash([]);
+    // hovered family
+    g.strokeStyle = hl; g.lineWidth = auto ? 1.2 : 1.6; g.setLineDash(auto ? [2, 3] : []);
+    for (let a = 0; a < A; a++) { g.beginPath(); rect(g, anchorAt(anc, cellIdx * A + a)); g.stroke(); }
+    g.setLineDash([]);
+    const hx = (hc + 0.5) * st * Z, hy = (hr + 0.5) * st * Z;
+    g.fillStyle = hl; g.beginPath(); g.arc(hx, hy, 4, 0, 2 * Math.PI); g.fill();
+    // GT boxes and their chips
+    gts.forEach((b, i) => {
+      Lab.box(g, [b[0] * Z, b[1] * Z, b[2] * Z, b[3] * Z], { color: c3, width: i === S.sel ? 3 : 2.2 });
+      if (i === S.sel) for (const [x, y] of [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]]) { g.fillStyle = c3; g.fillRect(x * Z - 3.5, y * Z - 3.5, 7, 7); }
+    });
+    gts.forEach((b, i) => {
+      const txt = perGt[i] ? `GT ${i + 1} · ${perGt[i]} positive` : `GT ${i + 1} · no positive anchor`;
+      const y = b[1] * Z - 17 < 0 ? b[3] * Z + 2 : b[1] * Z - 17;
+      chip(g, txt, b[0] * Z - 1, y, perGt[i] ? c3 : bad, placed);
+    });
+    // labels on positives: forced ones always, the others while there are few
+    for (const n of posList) if (m.forced[n]) { const b = anchorAt(anc, n); chip(g, `forced · IoU ${m.bestIou[n].toFixed(2)}`, b[0] * Z, b[3] * Z + 2, good, placed); }
+    if (posList.length <= 8) for (const n of [...posList].sort((a, b) => m.bestIou[b] - m.bestIou[a])) if (!m.forced[n]) {   // best first: it wins overlaps
+      const b = anchorAt(anc, n); chip(g, m.bestIou[n].toFixed(2), b[2] * Z - 34, b[1] * Z + 2, good, placed);
+    }
+    g.restore();
+
+    Lab.$("#cap-img").innerHTML = `image <small>${IMG} x ${IMG} px, stride ${st}: ${nf} x ${nf} cells x ${A} anchors</small>`;
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${c3}"></i>ground truth</span><span><i style="background:${good}"></i>positive (dashed = forced)</span>` +
+      `<span><i style="background:${muted}"></i>ignored</span><span><i style="background:${bad}"></i>negative</span><span><i style="background:${hl}"></i>one cell's anchors</span>`;
+
+    // ---- readouts
+    rN.set(N.toLocaleString("en-US")); rP.set(nP.toLocaleString("en-US"), nP ? "" : "bad"); rI.set(nI.toLocaleString("en-US")); rG.set(nG.toLocaleString("en-US"));
+    rR.set(nP ? `1 : ${Math.round(nG / nP)}` : "no pos", nP ? "" : "bad");
+    Lab.$("#formula").innerHTML =
+      `anchors = (H/s) · (W/s) · A\n` +
+      `        = (${IMG}/${st}) · (${IMG}/${st}) · (${scales.length}·${R})\n` +
+      `        = ${nf} · ${nf} · ${A} = <b>${N.toLocaleString("en-US")}</b>\n` +
+      `w = scale/√r, h = scale·√r`;
+    bAdd.disabled = gts.length >= 3; bDel.disabled = gts.length <= 1;
+
+    // ---- histogram of max IoU
+    const h = chist.ctx; chist.clear();
+    const NB = 20, cnt = [new Array(NB).fill(0), new Array(NB).fill(0), new Array(NB).fill(0)];   // neg, ign, pos
+    for (let n = 0; n < N; n++) { const b = Math.min(NB - 1, Math.floor(m.bestIou[n] * NB)); cnt[m.labels[n] === 1 ? 2 : m.labels[n] === 0 ? 0 : 1][b]++; }
+    let maxTot = 1; for (let b = 0; b < NB; b++) maxTot = Math.max(maxTot, cnt[0][b] + cnt[1][b] + cnt[2][b]);
+    const ymax = Math.max(1, Math.ceil(Math.log10(maxTot) + 0.05));
+    const ax = Lab.axes(h, { x: 34, y: 14, w: 208, h: 98, xmin: 0, xmax: 1, ymin: -0.3, ymax, xticks: [0, 0.25, 0.5, 0.75, 1],
+      yticks: Array.from({ length: ymax + 1 }, (_, i) => i), yfmt: (t) => (t >= 3 ? `${10 ** (t - 3)}k` : String(10 ** t)), xlabel: "max IoU with any GT" });
+    const cols = [Lab.alpha("--bad", 0.6), muted, good];
+    for (let b = 0; b < NB; b++) {
+      let cum = 0;
+      for (let l = 0; l < 3; l++) {
+        if (!cnt[l][b]) continue;
+        const y0 = ax.sy(cum ? Math.log10(cum) : -0.3), y1 = ax.sy(Math.log10(cum + cnt[l][b]));
+        h.fillStyle = cols[l]; h.fillRect(ax.sx(b / NB) + 1, y1, ax.sx(1 / NB) - ax.sx(0) - 2, y0 - y1);
+        cum += cnt[l][b];
+      }
+    }
+    h.save(); h.setLineDash([4, 3]); h.lineWidth = 1.5; h.strokeStyle = Lab.color("--ink-2");
+    for (const t of [S.neg, S.pos]) { h.beginPath(); h.moveTo(ax.sx(t) + 0.5, 12); h.lineTo(ax.sx(t) + 0.5, 112); h.stroke(); }
+    h.restore();
+    const same = Math.abs(S.pos - S.neg) < 1e-9;
+    Lab.text(h, same ? `neg | pos ${S.pos.toFixed(2)}` : `neg<${S.neg.toFixed(2)}`, ax.sx(S.neg) - (same ? -3 : 3), 10, { size: 10.5, align: same ? "left" : "right", color: Lab.color("--ink-2") });
+    if (!same) Lab.text(h, `pos≥${S.pos.toFixed(2)}`, Math.min(ax.sx(S.pos) + 3, 250 - 50), 10, { size: 10.5, color: Lab.color("--ink-2") });
+    for (const n of posList) if (m.forced[n]) {      // forced positives are 1 anchor among many in their bin: mark them
+      const x = ax.sx(m.bestIou[n]);
+      h.fillStyle = good; h.beginPath(); h.moveTo(x, 104); h.lineTo(x - 5, 112); h.lineTo(x + 5, 112); h.closePath(); h.fill();
+    }
+
+    // ---- the family of the hovered cell: max IoU of each anchor, rows = scale, columns = ratio
+    const f = cfam.ctx; cfam.clear();
+    const vals = [], labs = [];
+    for (let a = 0; a < A; a++) { vals.push(m.bestIou[cellIdx * A + a]); labs.push(m.labels[cellIdx * A + a]); }
+    const lx = 30, ty = 16, cw = Math.min(54, (250 - lx) / R), ch = Math.min(30, (150 - ty) / scales.length);
+    const surf = Lab.rgb(Lab.color("--surface"));
+    Lab.cells(f, vals, R, scales.length, lx, ty, cw * R, ch * scales.length, {
+      fmt: (v) => v.toFixed(2), size: Math.min(12, ch * 0.5),
+      color: (v, i, j) => { const l = labs[i * R + j]; return l === 1 ? Lab.rgb(good) : mixRGB(surf, Lab.rgb(l === 0 ? bad : muted), l === 0 ? 0.28 : 0.45); },
+    });
+    ratios.forEach((r, j) => Lab.text(f, `r ${RATIO_LABEL(r)}`, lx + (j + 0.5) * cw, 11, { size: 10.5, align: "center", color: Lab.color("--muted") }));
+    scales.forEach((s, i) => Lab.text(f, String(s), lx - 5, ty + (i + 0.5) * ch, { size: 10.5, align: "right", baseline: "middle", color: Lab.color("--muted") }));
+    Lab.$("#cap-fam").innerHTML = `anchors of cell (${hr}, ${hc}) <small>${auto ? `best cell for GT ${S.sel + 1}; hover the image` : `centre (${(hc + 0.5) * st}, ${(hr + 0.5) * st})`}: rows = scale, columns = ratio, value = max IoU</small>`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

@@ -7,11 +7,40 @@ the clock runs away. Times assume the 09:00-17:00 timetable in `02-syllabus-3-da
 ## Rhythm of a block (75-90 min)
 
 1. **Hook (5 min).** One image, one question. "Which of these two kernels found the edges?" "Why did the detector draw three boxes on one cat?"
-2. **Guided walk (20 min).** Run the figure cells of the notebook on the projector, top to bottom, stopping at each figure. Do not type code live; the figures are the slides.
-3. **Hands-on (45-50 min).** Students work the exercises in order. Circulate. The `[PASS]/[FAIL]` checkers mean you only get called for real confusion.
+2. **Guided walk (20 min).** Run the figure cells of the notebook on the projector, top to bottom, stopping at each figure. Do not type code live; the figures are the slides. At each `labs.show(...)` cell, read the **Predict first** question aloud, take a show of hands, then settle it on the projector by dragging (30-60 s per lab). Do not work through the lab's "Try this" list yourself.
+3. **Hands-on (45-50 min).** Students work top to bottom: for each lab the first two "Try this" items, then the exercise that follows it. Circulate. The `[PASS]/[FAIL]` checkers mean you only get called for real confusion.
 4. **Debrief (10-15 min).** Show the solution for the hardest exercise, run the training cell, discuss the numbers. End with the block's one-sentence takeaway.
 
 Cut list: every notebook's last section before "Summary" is optional and marked as such in the spec (hyperparameter search in D1-02, efficiency table in D1-03, ML Yearning case in D1-04, Selective Search demo in D2-01, second-stage loss walk-through in D2-02, anchor-free heads in D2-03, deployment in D2-04, autoencoder in D3-01, variants gallery in D3-02, alternatives in D3-03, capstone in D3-04). Cut from the end, never the exercises.
+
+## Interactive labs: time budget
+
+The labs were added after the blocks were timed, and done in full they do not fit: the last
+column is what every "Try this" item would cost. The plan above (prediction on the projector,
+two items per lab during hands-on) costs roughly a third of that. The **core** lab of each
+block is the one to protect; the others can be left as homework, since they run offline in
+any browser from `notebooks/cvcourse/labs/index.html`.
+
+| Block | Labs (core in bold) | The moment to show on the projector | Full "Try this" |
+|---|---|---|---|
+| D1-01 | **conv-playground**, receptive-field | Type a kernel that shifts the image; stride 2 shrinks the output. | 12 min |
+| D1-02 | **optimizer-playground**, lr-schedule, mixup-cutmix | Push SGD's learning rate past 1 on the ravine: it diverges while AdamW rattles. | 15 min |
+| D1-03 | **gradient-flow**, block-cost | At depth 40 the plain net's first-layer gradient is about 1e-16; the residual net's is about 20. | 10 min |
+| D1-04 | **freeze-unfreeze**, gradcam-by-hand | Freeze up to layer2: 94% of ResNet-50 still trains. | 8 min |
+| D2-01 | **iou-playground**, pr-curve, nms-playground | Drag the boxes apart: the IoU-loss arrows vanish, the GIoU arrows do not. | 22 min |
+| D2-02 | **anchor-matching**, roi-align, box-encoding | 2304 anchors, 6 positives; untick low-quality matches and the small box has none. | 24 min |
+| D2-03 | **focal-loss**, grid-assignment, fpn-levels | 100 000 easy negatives carry 97.7% of the loss under cross-entropy, 2.5% under focal loss. | 17 min |
+| D2-04 | **hungarian-matching** | Tick "compare with greedy": greedy is worse by 1.0. | 6 min |
+| D3-01 | **seg-metrics**, transposed-conv | Small object, press "clear": 97% pixel accuracy, IoU 0. | 10 min |
+| D3-02 | **unet-shapes**, sliding-window | Input size 100: the concat that fails turns red (24 vs 25). | 10 min |
+| D3-03 | **mask-paste** | 32 px box vs 340 px box: mask IoU barely moves, boundary IoU drops from 0.96 to 0.58. | 5 min |
+| D3-04 | **patch-attention**, clip-zero-shot | Shuffle the patches with position strength 0: the attention weights do not change. | 11 min |
+
+D2-01 and D2-02 are the tight blocks. If either runs late, keep the core lab and one more,
+and apply that block's "If running late" cut below.
+
+For projecting, `labs.open("name")` opens a lab full-window in the browser; a state can be
+bookmarked through the URL hash (for example `iou-playground.html#preset=disjoint&loss=iou`).
 
 ## Day 1
 

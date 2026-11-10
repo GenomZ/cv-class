@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>U-Net shapes</title>
+<meta name="lab-notebook" content="D3-02">
+<meta name="lab-summary" content="The U-Net drawn with the tensor shape of every block: change input size, depth, width, skips and upsampling, see where parameters and activation memory live, and where an awkward input size breaks the concat.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  #info { margin-top: 8px; min-height: 6em; white-space: pre-wrap; }
+  #status { margin: 8px 0 0; min-height: 2.9em; }
+  #status.bad { color: var(--bad); }
+  #status b { color: var(--ink); }
+  .readouts .readout { flex: 1 1 110px; }
+  .sizes { display: flex; gap: 5px; flex-wrap: wrap; }
+  .sizes .btn { padding: 3px 8px; font-weight: 500; }
+  #f-u canvas { cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>U-Net shapes</h1><span class="lab-tag">D3-02 · sections 1-2</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Every block shows its output tensor (channels x height x width); hover or click one for its operation and
+    parameter count. Then compare the two bar charts: where the <b>parameters</b> live and where the <b>activation memory</b> lives.</p>
+
+  <div class="lab-stage">
+    <div>
+      <figure class="lab-fig"><figcaption id="cap-u">the U</figcaption><div id="f-u"></div>
+        <div class="legend" id="legend" style="margin-top:4px"></div></figure>
+      <p class="note" id="status"></p>
+      <div class="lab-figs" style="margin-top:6px">
+        <figure class="lab-fig"><figcaption>parameters per level <small>encoder + decoder block of that resolution</small></figcaption><div id="f-p"></div></figure>
+        <figure class="lab-fig"><figcaption>activation memory per level <small>batch 1, float32</small></figcaption><div id="f-m"></div></figure>
+      </div>
+      <div class="formula" id="info"></div>
+    </div>
+    <div class="lab-controls">
+      <div class="ctl"><span class="ctl-label">presets</span><div class="btn-row" id="c-presets"></div></div>
+      <div id="c-size"></div>
+      <div class="sizes" id="c-sizes"></div>
+      <div id="c-arch" class="lab-controls"></div>
+      <div class="readouts" id="readouts"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>With the default network (128 px, depth 4, base 16), which level holds most of the ~1.9 M parameters, and which level holds most of the activation memory?
+        <details><summary>why</summary><p>Parameters of a 3x3 conv grow with channels squared (9 c<sub>in</sub> c<sub>out</sub>), and channels double per level:
+          the bottleneck alone holds ~46% and the two deepest levels almost 90%. Activations grow with height x width, which shrinks 4x per level:
+          level 0 (full resolution, few channels) alone holds about half of the memory, levels 0-1 about 80%. Training memory is dominated by the top of the U, the model size by the bottom.</p></details></li>
+      <li>Set the input to <b>100</b>. Before looking: where exactly does it break, and why does 128 work?
+        <details><summary>why</summary><p>Max-pooling floors: 100 &rarr; 50 &rarr; 25 &rarr; 12 &rarr; 6. On the way up, 6 &rarr; 12 matches, but 12 &rarr; 24 meets a
+          25 x 25 skip and torch.cat fails ("Expected size 24 but got size 25"). The side must be divisible by 2<sup>depth</sup> = 16. Fixes: pad the
+          input to 112 (and crop the output back), resize to 96 or 112, or crop / pad the skip inside the decoder. 130 fails one level higher (64 vs 65).</p></details></li>
+      <li>Keep 100 px and switch the <b>skips off</b>. Does it run now? Is the result usable?
+        <details><summary>why</summary><p>It runs (nothing is concatenated), but the output is 96 x 96 while the mask is 100 x 100: the loss fails instead,
+          or a resize silently shifts the boundaries. Turning the skips off also removes about 10% of the parameters (the decoder convs see half the channels).</p></details></li>
+      <li>Double the base channels (16 &rarr; 32). Predict the factor for parameters and for activation memory; then add one level of depth.
+        <details><summary>why</summary><p>Parameters scale with channels squared: about 4x. Activations scale with channels: about 2x. One more level adds a new bottleneck
+          with 4x the parameters of the old one (the total roughly quadruples) but almost no activation memory, because it sits at 1/32 of the resolution.</p></details></li>
+      <li>Click <b>original 2015</b> (valid convolutions, 572 px input, 64 base channels). Why is the output only 388 x 388, and why are the skips cropped?
+        <details><summary>why</summary><p>Unpadded 3x3 convs lose 2 px each, 4 per block, at every level on the way down and up. The decoder map is therefore smaller
+          than its skip, so the skip is centre-cropped before the concat. The paper predicts the 388 px centre of a 572 px tile and tiles a big image
+          with overlapping inputs (the overlap-tile strategy, section 6). Same padding keeps input = output and made this bookkeeping disappear.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const S = Lab.params({ size: 128, depth: 4, base: 16, skips: true, up: "transposed", conv: "same", in_ch: 3, classes: 4, sel: "bott" });
+  S.depth = Lab.clamp(Math.round(S.depth), 2, 5); S.size = Lab.clamp(Math.round(S.size), 16, 600);
+  const fmtInt = (v) => Math.round(v).toLocaleString("en-US");
+  const fmtK = (v) => (v >= 1e6 ? (v / 1e6).toFixed(v >= 1e7 ? 1 : 2) + " M" : v >= 1e3 ? (v / 1e3).toFixed(v >= 1e4 ? 0 : 1) + " k" : String(v));
+  const fmtMB = (v) => { const mb = (4 * v) / 2 ** 20; return mb >= 100 ? mb.toFixed(0) + " MB" : mb >= 1 ? mb.toFixed(1) + " MB" : (mb * 1024).toFixed(0) + " KB"; };
+  const sh = (c, h) => (h > 0 ? `${c} x ${h} x ${h}` : `${c} x ?`);
+
+  // ---------------------------------------------------------------- the network as numbers (mirrors day3.UNet)
+  function build() {
+    const D = S.depth, B = S.base, valid = S.conv === "valid", sk = S.skips, tr = S.up === "transposed";
+    const ch = (i) => B * 2 ** i;
+    const dcP = (a, b) => 9 * a * b + 2 * b + 9 * b * b + 2 * b;      // double_conv: conv3x3 (no bias) + BN, twice
+    const dcAct = (c, h) => { const h1 = valid ? h - 2 : h, h2 = valid ? h - 4 : h; return 2 * c * h1 * h1 + 2 * c * h2 * h2; };   // conv + BN outputs (ReLU is in place)
+    const shrink = valid ? 4 : 0;
+    const blocks = [], issues = [];
+    let fail = null, h = S.size;
+    const lvl = Array.from({ length: D + 1 }, () => ({ params: 0, act: 0 }));
+    for (let i = 0; i < D; i++) {
+      const cIn = i === 0 ? S.in_ch : ch(i - 1), e = h - shrink;
+      const b = { id: "enc" + i, kind: "enc", level: i, cIn, c: ch(i), hin: h, h: e, params: dcP(cIn, ch(i)), ok: e > 0 };
+      b.pparts = [[`double_conv(${cIn}, ${ch(i)})`, `9·${cIn}·${ch(i)} + 2·${ch(i)} + 9·${ch(i)}·${ch(i)} + 2·${ch(i)}`, b.params]];
+      if (e <= 0 && !fail) fail = { at: b.id, msg: `input too small: the convolutions of enc ${i + 1} would produce ${e} px` };
+      b.act = fail ? 0 : dcAct(ch(i), h);
+      b.pooled = Math.floor(e / 2);
+      if (!fail && e % 2) issues.push(`enc ${i + 1}: pooling an odd ${e} px map drops its last row and column (floor(${e} / 2) = ${b.pooled})`);
+      lvl[i].params += b.params; lvl[i].act += b.act;
+      if (!fail) lvl[i + 1].act += ch(i) * b.pooled ** 2;            // the pooled map lives at the next resolution
+      blocks.push(b); h = b.pooled;
+    }
+    const bott = { id: "bott", kind: "bott", level: D, cIn: ch(D - 1), c: ch(D), hin: h, h: h - shrink, params: dcP(ch(D - 1), ch(D)) };
+    bott.pparts = [[`double_conv(${ch(D - 1)}, ${ch(D)})`, `9·${ch(D - 1)}·${ch(D)} + 2·${ch(D)} + 9·${ch(D)}·${ch(D)} + 2·${ch(D)}`, bott.params]];
+    if (!fail && bott.h <= 0) fail = { at: "bott", msg: `input too small: the bottleneck would be ${bott.h} px` };
+    bott.ok = !fail; bott.act = fail ? 0 : dcAct(ch(D), h);
+    lvl[D].params += bott.params; lvl[D].act += bott.act;
+    blocks.push(bott);
+    let u = bott.h, cPrev = ch(D);
+    for (let i = D - 1; i >= 0; i--) {
+      const c = ch(i), up = 2 * u, skipH = blocks[i].h;
+      const upP = tr ? 4 * cPrev * c + c : 9 * cPrev * c + c;
+      const cIn = sk ? 2 * c : c, convP = dcP(cIn, c);
+      const b = { id: "dec" + i, kind: "dec", level: i, cUp: c, cSkip: sk ? c : 0, cIn, c, up, skipH, params: upP + convP };
+      b.pparts = [[tr ? `ConvTranspose2d(${cPrev}, ${c}, 2, stride 2)` : `Upsample(x2) + Conv2d(${cPrev}, ${c}, 3)`, tr ? `4·${cPrev}·${c} + ${c}` : `9·${cPrev}·${c} + ${c}`, upP],
+        [`double_conv(${cIn}, ${c})`, `9·${cIn}·${c} + 2·${c} + 9·${c}·${c} + 2·${c}`, convP]];
+      b.crop = 0;
+      if (!fail && sk) {
+        if (valid) { b.crop = skipH - up; if (b.crop < 0) fail = { at: b.id, msg: `the skip (${skipH} px) is smaller than the upsampled map (${up} px)` }; else if (b.crop % 2) issues.push(`dec ${i + 1}: cropping ${skipH} to ${up} px cannot be centred (odd difference)`); }
+        else if (skipH !== up) fail = { at: b.id, msg: `torch.cat: "Expected size ${up} but got size ${skipH}"`, up, skipH, level: i };
+      }
+      b.h = up - shrink;
+      if (!fail && b.h <= 0) fail = { at: b.id, msg: `input too small: dec ${i + 1} would produce ${b.h} px` };
+      b.ok = !fail;
+      const upAct = tr ? c * up * up : cPrev * up * up + c * up * up;  // the upsampling still runs when the concat then fails
+      b.act = b.ok ? upAct + (sk ? 2 * c * up * up : 0) + dcAct(c, up) : fail && fail.at === b.id && fail.up ? upAct : 0;
+      lvl[i].params += b.params; lvl[i].act += b.act;
+      blocks.push(b); u = b.h; cPrev = c;
+    }
+    const head = { id: "head", kind: "head", level: 0, cIn: B, c: S.classes, h: u, params: B * S.classes + S.classes, ok: !fail };
+    head.pparts = [[`Conv2d(${B}, ${S.classes}, 1)`, `${B}·${S.classes} + ${S.classes}`, head.params]];
+    head.act = fail ? 0 : S.classes * u * u;
+    lvl[0].params += head.params; lvl[0].act += head.act;
+    blocks.push(head);
+    if (!fail && u !== S.size) issues.unshift(`output ${u} x ${u} != input ${S.size} x ${S.size}` + (valid ? " (valid convolutions: expected, predict the centre of a larger tile)" : `: a ${S.size} x ${S.size} mask cannot be compared with it`));
+    const total = blocks.reduce((a, b) => a + b.params, 0), act = lvl.reduce((a, l) => a + l.act, 0);
+    return { D, blocks, lvl, fail, issues, total, act, out: u, byId: Object.fromEntries(blocks.map((b) => [b.id, b])) };
+  }
+
+  // ---------------------------------------------------------------- figures and controls
+  const W = 700, H = 282;
+  const cu = Lab.canvas("#f-u", W, H, { framed: true });
+  const cp = Lab.canvas("#f-p", 342, 142), cm = Lab.canvas("#f-m", 342, 142);
+  const preset = (o) => { Object.assign(S, o); sizeCtl.set(S.size); depthCtl.set(S.depth); baseCtl.set(S.base); skipCtl.set(S.skips); upCtl.set(S.up); convCtl.set(S.conv); redraw(); };
+  Lab.button("#c-presets", "D3-02 notebook", () => preset({ size: 128, depth: 4, base: 16, skips: true, up: "transposed", conv: "same", in_ch: 3, classes: 4, sel: "bott" }));
+  Lab.button("#c-presets", "original 2015", () => preset({ size: 572, depth: 4, base: 64, skips: true, up: "transposed", conv: "valid", in_ch: 1, classes: 2, sel: "dec3" }));
+  const sizeCtl = Lab.slider("#c-size", { label: "input size (px)", min: 16, max: 600, step: 1, value: S.size, fmt: (v) => `${v} x ${v}`, onInput: (v) => { S.size = v; redraw(); } });
+  for (const v of [64, 100, 112, 128, 130, 256, 572]) Lab.button("#c-sizes", String(v), () => { S.size = v; sizeCtl.set(v); redraw(); });
+  const depthCtl = Lab.segmented("#c-arch", { label: "depth (number of poolings)", options: [2, 3, 4, 5], value: S.depth, onChange: (v) => { S.depth = v; if (/\d/.test(S.sel) && +S.sel.slice(3) >= v) S.sel = "bott"; redraw(); } });
+  const baseCtl = Lab.segmented("#c-arch", { label: "base channels", options: [8, 16, 32, 64], value: S.base, onChange: (v) => { S.base = v; redraw(); } });
+  const skipCtl = Lab.toggle("#c-arch", { label: "skip connections (concat)", value: S.skips, onChange: (v) => { S.skips = v; redraw(); } });
+  const upCtl = Lab.select("#c-arch", { label: "upsampling in the decoder", value: S.up, options: [{ value: "transposed", label: "transposed conv 2x2, stride 2" }, { value: "bilinear", label: "bilinear x2 + conv 3x3" }], onChange: (v) => { S.up = v; redraw(); } });
+  const convCtl = Lab.segmented("#c-arch", { label: "3x3 convolutions", options: [{ value: "same", label: "same (padding 1)" }, { value: "valid", label: "valid (2015)" }], value: S.conv, onChange: (v) => { S.conv = v; redraw(); } });
+  const R = { params: Lab.readout("#readouts", "parameters"), out: Lab.readout("#readouts", "output"), act: Lab.readout("#readouts", "activations"), bott: Lab.readout("#readouts", "bottleneck") };
+
+  // ---------------------------------------------------------------- layout of the U
+  let rects = {}, hoverId = null;
+  function layout(net) {
+    const D = net.D, bw = 104, bh = 36, top = 34;
+    const sp = Math.min(60, (H - top - bh - 14) / D);
+    const dx = Math.min(70, (W / 2 - 10 - bw / 2 - 62) / D);
+    const y = (lv) => top + lv * sp;
+    rects = {};
+    for (let i = 0; i < D; i++) {
+      rects["enc" + i] = [10 + i * dx, y(i), bw, bh];
+      rects["dec" + i] = [W - 10 - bw - i * dx, y(i), bw, bh];
+    }
+    rects.bott = [W / 2 - bw / 2 - 8, y(D), bw + 16, bh];
+    rects.head = [W - 10 - bw, 2, bw, 22];
+    return { bw, bh };
+  }
+  const hit = (p) => Object.entries(rects).find(([, r]) => p.x >= r[0] && p.x <= r[0] + r[2] && p.y >= r[1] && p.y <= r[1] + r[3]);
+  Lab.pointer(cu, {
+    hover: (p) => { const h = hit(p); const id = h ? h[0] : null; if (id !== hoverId) { hoverId = id; redraw(); } },
+    leave: () => { hoverId = null; redraw(); },
+    down: (p) => { const h = hit(p); if (h) { S.sel = h[0]; redraw(); } },
+  });
+
+  const blockName = (id) => (id === "bott" ? "the bottleneck" : id === "head" ? "the head" : `${id.slice(0, 3)} ${+id.slice(3) + 1}`);
+  function arrow(g, x0, y0, x1, y1, color, { dash = [], width = 2 } = {}) {
+    g.save(); g.strokeStyle = color; g.fillStyle = color; g.lineWidth = width; g.setLineDash(dash);
+    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.setLineDash([]);
+    const a = Math.atan2(y1 - y0, x1 - x0), L = 7;
+    g.beginPath(); g.moveTo(x1, y1); g.lineTo(x1 - L * Math.cos(a - 0.45), y1 - L * Math.sin(a - 0.45)); g.lineTo(x1 - L * Math.cos(a + 0.45), y1 - L * Math.sin(a + 0.45)); g.closePath(); g.fill();
+    g.restore();
+  }
+
+  window.labDebug = () => { draw(); const net = build(); return { blocks: net.blocks.map(({ pparts, ...b }) => b), lvl: net.lvl, total: net.total, act: net.act, out: net.out, fail: net.fail, issues: net.issues,
+    readouts: Object.fromEntries(Object.entries(R).map(([k, r]) => [k, r.el.querySelector(".v").textContent])), status: Lab.$("#status").textContent }; };
+
+  function draw() {
+    const net = build(), D = net.D, g = cu.ctx;
+    if (!net.byId[S.sel]) S.sel = "bott";
+    const { bw, bh } = layout(net);
+    cu.clear();
+    const C1 = Lab.color("--c1"), C2 = Lab.color("--c2"), C4 = Lab.color("--c4"), BAD = Lab.color("--bad"), MUT = Lab.color("--muted");
+    const failLevel = net.fail && net.fail.at.startsWith("dec") ? +net.fail.at.slice(3) : null;
+    const computed = (b) => b.ok;
+    // arrows first
+    for (let i = 0; i < D; i++) {
+      const e = rects["enc" + i], next = i + 1 < D ? rects["enc" + (i + 1)] : rects.bott;
+      arrow(g, e[0] + 30, e[1] + bh, Math.max(next[0] + 22, e[0] + 30), next[1] - 1, C1);
+      const d = rects["dec" + i], below = i + 1 < D ? rects["dec" + (i + 1)] : rects.bott;
+      const dec = net.byId["dec" + i];
+      arrow(g, Math.min(below[0] + below[2] - 22, d[0] + d[2] - 30), below[1] - 1, d[0] + d[2] - 30, d[1] + bh, dec.ok || failLevel === i ? C2 : MUT, { dash: dec.ok || failLevel === i ? [] : [4, 4] });
+      if (S.skips) {
+        const bad = failLevel === i, y0 = e[1] + bh / 2;
+        arrow(g, e[0] + bw + 2, y0, d[0] - 3, y0, bad ? BAD : C4, { dash: [6, 4], width: bad ? 2.5 : 2 });
+        const mid = (e[0] + bw + d[0]) / 2, enc = net.byId["enc" + i];
+        const lab = bad ? `${dec.up} vs ${dec.skipH}: cat fails` : `${dec.cUp} + ${dec.cSkip} = ${dec.cIn} ch`;
+        Lab.text(g, lab, mid, y0 - 6, { size: 10.5, align: "center", weight: bad ? 700 : 500, color: bad ? BAD : Lab.color("--ink-2") });
+        if (S.conv === "valid" && dec.ok && enc.h !== dec.up) Lab.text(g, `crop ${enc.h} → ${dec.up}`, mid, y0 + 14, { size: 10, align: "center", color: Lab.color("--muted") });
+      }
+    }
+    // input and output labels
+    const e0 = rects.enc0;
+    Lab.text(g, `input ${sh(S.in_ch, S.size)}`, e0[0], 14, { size: 11.5, weight: 600, color: Lab.color("--ink") });
+    arrow(g, e0[0] + 30, 19, e0[0] + 30, e0[1] - 1, Lab.color("--axis"));
+    // blocks
+    const fill = { enc: Lab.alpha("--c1", 0.13), dec: Lab.alpha("--c2", 0.13), bott: Lab.alpha("--c1", 0.22), head: Lab.color("--wash") };
+    for (const b of net.blocks) {
+      const r = rects[b.id]; if (!r) continue;
+      const bad = net.fail && net.fail.at === b.id, sel = S.sel === b.id, hov = hoverId === b.id;
+      g.save();
+      g.fillStyle = b.ok ? fill[b.kind] : Lab.color("--wash");
+      g.beginPath(); g.roundRect(r[0], r[1], r[2], r[3], 6); g.fill();
+      g.lineWidth = sel || hov || bad ? 2.5 : 1; g.strokeStyle = bad ? BAD : sel || hov ? Lab.color("--hl") : Lab.color("--axis");
+      if (!b.ok && !bad) g.setLineDash([4, 3]);
+      g.stroke(); g.restore();
+      const name = b.kind === "enc" ? `enc ${b.level + 1}` : b.kind === "dec" ? `dec ${b.level + 1}` : b.kind === "bott" ? "bottleneck" : "head 1x1";
+      const ink = b.ok ? Lab.color("--ink") : MUT;
+      if (b.kind === "head") {
+        Lab.text(g, `${name} → ${b.ok ? sh(b.c, b.h) : "?"}`, r[0] + r[2] / 2, r[1] + 15, { size: 10.5, align: "center", color: ink, weight: 600 });
+      } else {
+        Lab.text(g, name, r[0] + 6, r[1] + 13, { size: 10, color: b.ok ? Lab.color("--ink-2") : MUT });
+        Lab.text(g, fmtK(b.params), r[0] + r[2] - 6, r[1] + 13, { size: 10, color: MUT, align: "right" });
+        Lab.text(g, b.ok ? sh(b.c, b.h) : bad ? "cat fails" : "not reached", r[0] + r[2] / 2, r[1] + 29, { size: 11.5, align: "center", color: bad ? BAD : ink, weight: 650, mono: b.ok });
+      }
+    }
+    const d0 = rects.dec0, hd = rects.head;
+    arrow(g, d0[0] + d0[2] / 2, d0[1] - 1, hd[0] + hd[2] / 2, hd[1] + hd[3] + 1, Lab.color("--axis"));
+    Lab.text(g, "blocks show the output tensor; small number = parameters", 10, H - 8, { size: 10.5, color: MUT });
+    Lab.$("#legend").innerHTML = `<span><i style="background:${C1}"></i>double conv, then max-pool /2</span><span><i style="background:${C2}"></i>${S.up === "transposed" ? "up-conv 2x2 (x2)" : "bilinear x2 + conv 3x3"}, concat, double conv</span>` +
+      (S.skips ? `<span><i style="background:${C4}"></i>skip: copy${S.conv === "valid" ? " + crop" : ""} (label: up ch + skip ch = decoder input)</span>` : `<span>skips off: the decoder sees only the upsampled map</span>`);
+    const divNote = S.conv === "valid" ? "" : S.size % 2 ** D ? ` (not a multiple of 2<sup>${D}</sup> = ${2 ** D})` : ` (= ${S.size / 2 ** D} x 2<sup>${D}</sup>)`;
+    Lab.$("#cap-u").innerHTML = `the U <small>depth ${D}, base ${S.base}, ${S.conv} convolutions, input ${S.size} px${divNote}</small>`;
+
+    // status line: failure, fix, warnings
+    const st = Lab.$("#status");
+    st.className = "note" + (net.fail ? " bad" : "");
+    if (net.fail) {
+      const m = 2 ** D, lo = Math.floor(S.size / m) * m, hi = Math.ceil(S.size / m) * m;
+      let txt = `<b>Forward pass fails at ${blockName(net.fail.at)}:</b> ${net.fail.msg}.`;
+      if (net.fail.up) txt += ` Max-pooling floors odd sizes, so the way down loses a pixel the way up cannot recreate. Fix: make the side a multiple of 2<sup>${D}</sup> = ${m}: pad the input to <b>${hi}</b> (and crop the output back), resize to ${lo || m} or ${hi}, or crop / pad the skip inside the decoder.`;
+      st.innerHTML = txt;
+    } else if (net.issues.length) st.innerHTML = net.issues.map((s) => `<b>Note:</b> ${s}.`).join(" ");
+    else st.innerHTML = `Runs: every concat matches and the output is ${net.out} x ${net.out}, the size of the input.`;
+
+    // per-level bars
+    function bars(c, key, color, fmtV, title) {
+      const h = c.ctx; c.clear();
+      const vals = net.lvl.map((l) => l[key]), tot = vals.reduce((a, b) => a + b, 0) || 1, mx = Math.max(...vals) || 1;
+      const rowH = Math.min(20, (c.h - 22) / (D + 1)), x0 = 64, wmax = c.w - x0 - 92;
+      vals.forEach((v, lv) => {
+        const yy = 4 + lv * rowH;
+        Lab.text(h, lv === D ? `bottleneck` : `level ${lv}`, x0 - 6, yy + rowH / 2, { size: 11, align: "right", baseline: "middle", color: Lab.color("--ink-2") });
+        h.fillStyle = Lab.color("--wash"); h.fillRect(x0, yy + 3, wmax, rowH - 6);
+        h.fillStyle = color; h.fillRect(x0, yy + 3, Math.max(v > 0 ? 1.5 : 0, (wmax * v) / mx), rowH - 6);
+        Lab.text(h, `${fmtV(v)}  ${Math.round((100 * v) / tot)}%`, x0 + wmax + 6, yy + rowH / 2, { size: 11, baseline: "middle", color: Lab.color("--ink") });
+      });
+      const res = net.lvl.map((_, lv) => (lv === D ? net.byId.bott.hin : net.byId["enc" + lv].hin));
+      Lab.text(h, title(res), x0, 4 + (D + 1) * rowH + 12, { size: 10.5, color: Lab.color("--muted") });
+    }
+    bars(cp, "params", C1, fmtK, () => `total ${fmtInt(net.total)}`);
+    bars(cm, "act", C2, fmtMB, () => `total ${fmtMB(net.act)}${net.fail ? " (up to the failure)" : ""} = ${fmtInt(net.act)} values`);
+
+    // readouts
+    R.params.set(fmtK(net.total));
+    R.out.set(net.fail ? "error" : `${net.out} x ${net.out}`, net.fail ? "bad" : net.out === S.size ? "good" : S.conv === "valid" ? "" : "bad");
+    R.act.set(fmtMB(net.act));
+    const bt = net.byId.bott; R.bott.set(bt.ok ? `${bt.c} x ${bt.h}²` : "-");
+
+    // details of the selected (or hovered) block
+    const b = net.byId[hoverId || S.sel] || net.byId.bott;
+    const name = b.kind === "enc" ? `enc ${b.level + 1} (level ${b.level})` : b.kind === "dec" ? `dec ${b.level + 1} (level ${b.level})` : b.kind === "bott" ? `bottleneck (level ${D})` : "head";
+    const pct = (100 * b.params / net.total).toFixed(1);
+    let op = "";
+    if (b.kind === "enc") op = `[conv3x3-BN-ReLU] x 2: ${sh(b.cIn, b.hin)} -> ${sh(b.c, b.h)}, then max-pool 2x2 -> ${sh(b.c, b.pooled)}`;
+    else if (b.kind === "bott") op = `[conv3x3-BN-ReLU] x 2: ${sh(b.cIn, b.hin)} -> ${sh(b.c, b.h)}`;
+    else if (b.kind === "dec") op = `${S.up === "transposed" ? "up-conv 2x2" : "bilinear x2 + conv 3x3"}: ${sh(b.c * 2, b.up / 2)} -> ${sh(b.cUp, b.up)}` +
+      (S.skips ? `\nconcat skip ${sh(b.c, b.skipH)}${b.crop > 0 ? ` (cropped to ${b.up})` : ""} -> ${b.ok || (net.fail && net.fail.at === b.id) ? (net.fail && net.fail.at === b.id ? "FAILS: " + b.up + " vs " + b.skipH : sh(b.cIn, b.up)) : "?"}` : "\nno skip") +
+      `\n[conv3x3-BN-ReLU] x 2: ${b.cIn} -> ${b.c} channels -> ${b.ok ? sh(b.c, b.h) : "?"}`;
+    else op = `1x1 conv: ${S.base} channels -> ${S.classes} class logits per pixel -> ${b.ok ? sh(b.c, b.h) : "?"}`;
+    Lab.$("#info").innerHTML = `<b>${name}</b>${hoverId ? "" : "  (click another block)"}\n${op}\nparameters:\n` +
+      b.pparts.map(([what, f, v]) => `  ${what} = ${f} = ${fmtInt(v)}`).join("\n") +
+      `\n  block total ${fmtInt(b.params)} = <b>${pct}%</b> of ${fmtInt(net.total)}` + (b.ok ? `;  activations ${fmtInt(b.act)} values (${fmtMB(b.act)})` : "");
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

@@ -40,7 +40,7 @@ CELLS = [
     from matplotlib.patches import Rectangle, Patch
     import torch, torch.nn as nn, torch.nn.functional as F
     from torch.utils.data import DataLoader
-    from cvcourse import viz, seg, shapes, tests, torchkit, day3
+    from cvcourse import viz, seg, shapes, tests, torchkit, day3, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -74,11 +74,24 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Follow the left column down: every step halves the side and doubles the channels; every orange skip
+    hands an encoder map to the decoder block of the **same** size.
+
+    ### Lab · U-Net shapes
+    **Predict first:** this network has about 1.9 M parameters. Roughly what share of them sits in the
+    bottleneck alone, and which level needs the most activation memory during training? Read the two bar
+    charts, then work through the "Try this" list under the lab (5 minutes).
+    """),
+    code("""
+    labs.show("unet-shapes")
+    """),
+    md(r"""
     ### Exercise 1 · the shape schedule
 
-    Return `[(channels, size)]` for each encoder level and the bottleneck: level `i` has
-    `base * 2**i` channels at `input_size / 2**i`. (The original paper used 64 base channels,
-    unpadded convolutions and a 572 px input; "same" padding makes the bookkeeping trivial.)
+    Return `[(channels, size)]` for each encoder level and the bottleneck (`depth + 1` tuples of
+    ints): level `i` has `base * 2**i` channels at `input_size // 2**i` (integer division, as
+    max-pooling floors). (The original paper used 64 base channels, unpadded convolutions and a
+    572 px input, the lab's "original 2015" preset; "same" padding makes the bookkeeping trivial.)
     """),
     exercise(
         stub="""
@@ -96,8 +109,9 @@ CELLS = [
         """),
     md(r"""
     > **Divisibility.** Four poolings need a side divisible by $2^4 = 16$; otherwise the
-    > upsampled decoder map is one pixel smaller than its skip and `torch.cat` fails. Pad
-    > the input (or crop the skip) when sizes do not divide.
+    > upsampled decoder map is one pixel smaller than its skip and `torch.cat` fails (the red
+    > concat you saw in the lab at 100 px: 24 vs 25). Pad the input (or crop the skip) when
+    > sizes do not divide.
 
     ## 2 · The building blocks
 
@@ -176,6 +190,7 @@ CELLS = [
     Encoders with channels `base * 2**i` (`i < depth`), a bottleneck `double_conv` to
     `base * 2**depth`, decoders in reverse order each fed the **matching skip**, and a 1x1
     head. Keep the skips in a list on the way down and walk it backwards on the way up.
+    `forward(x)` takes `(N, in_ch, H, W)` and returns logits `(N, num_classes, H, W)`.
     """),
     exercise(
         stub="""
@@ -223,6 +238,9 @@ CELLS = [
     print(torchkit.summarize(net, (1, 3, 128, 128), depth=2))
     """),
     md(r"""
+    Check the total against the lab (1,942,628 for this configuration) and find the bottleneck and the
+    deepest decoder block in the table: together they hold most of the weights.
+
     ### Output activation and loss
 
     | task | head channels | activation at inference | loss | prediction |
@@ -264,6 +282,9 @@ CELLS = [
     `day3.CEDiceLoss(dice_weight=0.5)` = `0.5 * cross_entropy + 0.5 * multi-class soft Dice`.
 
     ## 3 · Train on synthetic shapes (~2 minutes on a CPU)
+
+    We now have the network and the loss; what is missing is data and a training run, first on
+    synthetic shapes where the answer is known exactly.
 
     64 px images with circles, squares and triangles (4 classes with background). Colour
     already gives the class away here, so the real challenge is **where the boundary is** -
@@ -462,14 +483,23 @@ CELLS = [
     once. Predict on overlapping windows and **average the logits** where windows overlap
     (the overlap hides the weaker predictions near window borders, where the network saw
     less context).
+
+    ### Lab · sliding-window inference
+    **Predict first:** a 200 x 200 image, 64 px windows, stride 48. How many forward passes does
+    `sliding_window_predict` run, and how many with stride 16? Check in the lab, then work through the
+    "Try this" list (4-5 minutes).
+    """),
+    code("""
+    labs.show("sliding-window")
     """),
     md(r"""
     ### Exercise 5 · `sliding_window_predict`
 
     `image (C, H, W)`; `model_fn` maps `(1, C, window, window)` to `(1, K, window, window)`.
     Window positions `0, stride, 2*stride, ...`; if the last window does not end exactly at
-    the border, **add one more window ending at the border**. Accumulate the outputs and a
-    count map, return `out / count` of shape `(K, H, W)`.
+    the border, **add one more window ending at the border** (the dashed, shifted tiles in the
+    lab). Accumulate the outputs and a count map (the lab's "tiles per pixel"), return
+    `out / count` of shape `(K, H, W)`, with `K` taken from the model's output.
     """),
     exercise(
         stub="""
@@ -521,6 +551,10 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    These are the 16 windows of the lab's default state. The stitched prediction shows no tile seams
+    although no single window saw the whole image; a Gaussian weighting of each window (the lab's
+    "Gaussian" blend, used by nnU-Net and MONAI) would down-weight the window borders further.
+
     ### Test-time augmentation (TTA)
 
     Predict on the image and its horizontal flip, flip the second prediction back, average.

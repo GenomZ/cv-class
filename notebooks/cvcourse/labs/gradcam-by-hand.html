@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grad-CAM by hand</title>
+<meta name="lab-notebook" content="D1-04">
+<meta name="lab-summary" content="Grad-CAM as a visible weighted sum: eight feature maps of the photo, one weight alpha_k each, the sum, the ReLU and the upsampled heat map; presets play the pooled gradients of three classes.">
+<meta name="lab-height" content="940">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .under { margin-top: 10px; }
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 14px; }
+  .tile { margin: 0; min-width: 0; }
+  .tile figcaption { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 0 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .ctl { margin-top: 2px; }
+  .tile .ctl-label { font-weight: 400; }
+  #formula { font-size: 11.5px; }
+  .readouts .readout { flex: 1 1 110px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Grad-CAM by hand</h1><span class="lab-tag">D1-04 · section 6</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Grad-CAM is a weighted sum of feature maps, L = ReLU(Σ_k α_k A^k). Here eight hand-made maps of the photo
+    play layer4's channels and α_k plays one class's averaged gradient. Set the weights, hover any map.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="tiles" id="tiles"></div>
+      <p class="lab-cap under" id="cap-pipe">weighted sum</p>
+      <div id="fig-pipe"></div>
+      <div class="formula under" id="formula"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-main" class="lab-controls"></div>
+      <div class="readouts" id="readouts"></div>
+      <p class="note">With a global-average-pool + linear head, ∂y/∂A^k is the same in every cell (w_k / hw), so α_k is the
+        class weight and Grad-CAM equals CAM (Zhou et al. 2016); y is then the mean of the sum. Deeper heads make α_k a true average.</p>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Switch from <b>face</b> to <b>uniform</b>. The eight feature maps do not change at all. Why does the heat map move?
+        <details><summary>why</summary><p>Only the α_k changed. The feature maps are computed once for the image and are the same for every class;
+          the class enters Grad-CAM only through the gradients, pooled into one weight per channel. That is what makes the map class-specific.</p></details></li>
+      <li>Turn the <b>ReLU</b> off. Which regions now look half-hot, and why is that misleading?
+        <details><summary>why</summary><p>Without the ReLU, min-max scaling maps the most negative evidence to 0, so regions that are simply
+          irrelevant (sum ≈ 0) appear warm. Negative values are evidence <i>against</i> this class (often for another one); the ReLU keeps only what
+          increases y^c.</p></details></li>
+      <li>Set the grid to 4 x 4, then to 32 x 32. Why are real Grad-CAM maps always smooth blobs?
+        <details><summary>why</summary><p>The map is only as fine as the feature map it weights. ResNet-50's layer4 on a 224 px image is 7 x 7: every
+          cell covers 32 x 32 pixels. Bilinear upsampling makes it smooth but adds no detail. Grad-CAM on layer3 (14 x 14) is sharper but less semantic.</p></details></li>
+      <li>Set every α to 0 except <b>centre</b>. The map highlights the face. Is that an explanation?
+        <details><summary>answer</summary><p>No: the centre map ignores the image, so you would get the same blob for any photo - here it only
+          happens to fall on the face. A plausible-looking map can carry no information about the content (Adebayo et al. 2018); this is why
+          the notebook measures the evidence against the pet mask instead of trusting a few nice pictures.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(async () => {
+  const NAMES = ["vertical edges", "horizontal edges", "bright", "dark", "warm (red, skin)", "blue", "texture", "centre"];
+  const SUP = ["¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸"];
+  const PRESETS = {
+    face: [-0.2, 0.3, 0.2, -0.6, 1.0, -0.8, 0.0, 0.3],
+    uniform: [0.2, 0.4, -0.5, 1.0, -0.6, -0.8, 0.2, 0.0],
+    flag: [0.5, 0.2, 0.3, -0.5, 0.4, -0.3, 0.8, -1.0],
+    equal: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+  };
+  const RES = [4, 8, 16, 32];
+  const S = Lab.params({ preset: "face", w: "", relu: true, res: 8, px: 64, py: 50 });
+  if (!PRESETS[S.preset]) S.preset = "face";
+  if (!RES.includes(S.res)) S.res = 8;
+  let alpha = PRESETS[S.preset].slice();
+  const custom = S.w.split(",").map(Number);
+  if (custom.length === 8 && custom.every(Number.isFinite)) { alpha = custom.map((v) => Lab.clamp(v, -1, 1)); S.preset = "custom"; }
+
+  // ---- feature maps at full resolution (128 x 128), from the sample photo
+  const photo = await Lab.photo();
+  const N = photo.w, G = photo.gray, RGB = photo.rgb;
+  const at = (a, i, j) => a[Lab.clamp(i, 0, N - 1) * N + Lab.clamp(j, 0, N - 1)];   // replicate the border
+  function conv3(a, k) {
+    const out = new Float64Array(N * N);
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      let s = 0; for (let u = 0; u < 3; u++) for (let v = 0; v < 3; v++) s += k[u * 3 + v] * at(a, i + u - 1, j + v - 1);
+      out[i * N + j] = s;
+    }
+    return out;
+  }
+  const full = [];
+  full.push(conv3(G, [-1, 0, 1, -2, 0, 2, -1, 0, 1]).map(Math.abs));       // vertical edges: |sobel x|
+  full.push(conv3(G, [-1, -2, -1, 0, 0, 0, 1, 2, 1]).map(Math.abs));       // horizontal edges: |sobel y|
+  full.push(Float64Array.from(G));                                          // bright
+  full.push(Float64Array.from(G, (v) => 1 - v));                            // dark
+  full.push(Float64Array.from({ length: N * N }, (_, i) => Math.max(0, RGB[3 * i] - RGB[3 * i + 2])));   // warm: red > blue
+  full.push(Float64Array.from({ length: N * N }, (_, i) => Math.max(0, RGB[3 * i + 2] - RGB[3 * i])));   // blue > red
+  const tex = new Float64Array(N * N);                                      // texture: std of the 5 x 5 neighbourhood
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    let s = 0, s2 = 0;
+    for (let u = -2; u <= 2; u++) for (let v = -2; v <= 2; v++) { const x = at(G, i + u, j + v); s += x; s2 += x * x; }
+    tex[i * N + j] = Math.sqrt(Math.max(0, s2 / 25 - (s / 25) ** 2));
+  }
+  full.push(tex);
+  full.push(Float64Array.from({ length: N * N }, (_, i) => Math.exp(-(((i % N) - 63.5) ** 2 + (Math.floor(i / N) - 63.5) ** 2) / (2 * 24 * 24))));
+
+  const pooledCache = {};
+  /** A^k at R x R: average-pool the full map, then divide by its maximum (activations in [0, 1]). */
+  function features(R) {
+    if (pooledCache[R]) return pooledCache[R];
+    const c = N / R;
+    pooledCache[R] = full.map((a) => {
+      const p = new Float64Array(R * R);
+      for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) p[Math.floor(i / c) * R + Math.floor(j / c)] += a[i * N + j] / (c * c);
+      const m = Math.max(1e-9, ...p);
+      return p.map((v) => v / m);
+    });
+    return pooledCache[R];
+  }
+  /** F.interpolate(cam, size=(N, N), mode="bilinear", align_corners=False) */
+  function upsample(cam, R) {
+    const out = new Float64Array(N * N), sc = R / N;
+    const idx = (o) => { const s = Math.max(0, (o + 0.5) * sc - 0.5), i0 = Math.floor(s); return [i0, Math.min(i0 + 1, R - 1), s - i0]; };
+    for (let y = 0; y < N; y++) {
+      const [y0, y1, ly] = idx(y);
+      for (let x = 0; x < N; x++) {
+        const [x0, x1, lx] = idx(x);
+        out[y * N + x] = (1 - ly) * ((1 - lx) * cam[y0 * R + x0] + lx * cam[y0 * R + x1]) + ly * ((1 - lx) * cam[y1 * R + x0] + lx * cam[y1 * R + x1]);
+      }
+    }
+    return out;
+  }
+
+  // ---- tiles: one feature map + its weight
+  const tiles = [], sliders = [];
+  NAMES.forEach((name, k) => {
+    const fig = Lab.el("figure", { class: "tile" }, Lab.el("figcaption", { text: `A${SUP[k]} ${name}`, title: name }));
+    Lab.$("#tiles").append(fig);
+    const cv = Lab.canvas(fig, 96, 96);
+    tiles.push(cv);
+    sliders.push(Lab.slider(fig, { label: `α${SUP[k]}`, min: -1, max: 1, step: 0.05, value: alpha[k],
+      fmt: (v) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(2),
+      onInput: (v) => { alpha[k] = v; S.preset = "custom"; presetCtl.set("custom"); redraw(); } }));
+    Lab.pointer(cv, { hover: pickTile, down: pickTile, move: pickTile });
+  });
+  function pickTile(p) { S.px = Lab.clamp(Math.floor((p.x / 96) * N), 0, N - 1); S.py = Lab.clamp(Math.floor((p.y / 96) * N), 0, N - 1); redraw(); }
+
+  // ---- controls
+  const presetCtl = Lab.segmented("#c-main", { label: "α preset: pooled gradients of the class", value: S.preset,
+    options: [{ value: "face", label: "face" }, { value: "uniform", label: "uniform" }, { value: "flag", label: "flag" }, { value: "equal", label: "all equal" }],
+    onChange: (v) => { S.preset = v; alpha = PRESETS[v].slice(); sliders.forEach((s, k) => s.set(alpha[k])); redraw(); } });
+  Lab.segmented("#c-main", { label: "feature-map grid (h x w)", value: S.res, options: RES.map((r) => ({ value: r, label: `${r} x ${r}` })),
+    onChange: (v) => { S.res = v; redraw(); } });
+  Lab.toggle("#c-main", { label: "ReLU (keep positive evidence only)", value: S.relu, onChange: (v) => { S.relu = v; redraw(); } });
+  Lab.button("#c-main", "Set every α to 0", () => { alpha = alpha.map(() => 0); sliders.forEach((s) => s.set(0)); S.preset = "custom"; presetCtl.set("custom"); redraw(); });
+  const rY = Lab.readout("#readouts", "class score y");
+  const rS = Lab.readout("#readouts", "sum at the cell");
+  const rH = Lab.readout("#readouts", "heat at the pixel");
+  const rPos = Lab.readout("#readouts", "cells > 0");
+
+  // ---- pipeline canvas: sum -> ReLU -> upsampled on the photo
+  const P = 172, PX = [0, 262, 524], TOP = 22;
+  const cp = Lab.canvas("#fig-pipe", 700, TOP + P + 6);
+  Lab.pointer(cp, {
+    hover: pickPipe, down: pickPipe, move: pickPipe,
+  });
+  function pickPipe(p) {
+    const k = PX.findIndex((x) => p.x >= x && p.x < x + P);
+    if (k < 0 || p.y < TOP || p.y >= TOP + P) return;
+    S.px = Lab.clamp(Math.floor(((p.x - PX[k]) / P) * N), 0, N - 1); S.py = Lab.clamp(Math.floor(((p.y - TOP) / P) * N), 0, N - 1); redraw();
+  }
+  const f2 = (v) => (v < 0 ? "−" : "") + Math.abs(v).toFixed(2);
+  const sgn = (v) => (v < 0 ? "−" : "+");
+
+  function draw() {
+    const R = S.res, A = features(R), cell = N / R;
+    const ci = Math.floor(S.py / cell), cj = Math.floor(S.px / cell);
+    const sum = new Float64Array(R * R);
+    for (let k = 0; k < 8; k++) for (let i = 0; i < R * R; i++) sum[i] += alpha[k] * A[k][i];
+    const cam = S.relu ? sum.map((v) => Math.max(0, v)) : sum;
+    const up = upsample(cam, R);
+    let lo = Infinity, hi = -Infinity; for (const v of up) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const heat = up.map((v) => (v - lo) / Math.max(hi - lo, 1e-8));       // min-max to [0, 1], as in torchkit.gradcam
+    const hl = Lab.color("--hl");
+    const mark = (ctx, x, y, s) => { ctx.save(); ctx.strokeStyle = hl; ctx.lineWidth = 2; ctx.strokeRect(x + cj * s, y + ci * s, s, s); ctx.restore(); };
+
+    // tiles
+    tiles.forEach((cv, k) => {
+      const g = cv.ctx; cv.clear();
+      Lab.image(g, A[k], R, R, 0, 0, 96, 96, (v) => Lab.grayRGB(v));
+      const c = Lab.divergingRGB(alpha[k]);
+      g.save(); g.strokeStyle = `rgb(${c})`; g.lineWidth = 6; g.strokeRect(3, 3, 90, 90); g.restore();
+      mark(g, 0, 0, 96 / R);
+    });
+
+    // pipeline
+    const g = cp.ctx; cp.clear();
+    const ink = Lab.color("--ink"), muted = Lab.color("--muted");
+    const m = Math.max(1e-9, ...sum.map(Math.abs));
+    Lab.text(g, `Σ_k α_k A^k  (${R} x ${R})`, PX[0], 13, { size: 12, weight: 600, color: ink });
+    Lab.image(g, sum, R, R, PX[0], TOP, P, P, (v) => Lab.divergingRGB(v / m));
+    mark(g, PX[0], TOP, P / R);
+    const cm = Math.max(...cam), cmin = Math.min(...cam);
+    Lab.text(g, S.relu ? "ReLU of the sum" : "no ReLU: the sum itself", PX[1], 13, { size: 12, weight: 600, color: ink });
+    Lab.image(g, cam, R, R, PX[1], TOP, P, P, (v) => Lab.sequentialRGB((v - cmin) / Math.max(cm - cmin, 1e-9)));
+    mark(g, PX[1], TOP, P / R);
+    Lab.text(g, "upsampled, on the photo", PX[2], 13, { size: 12, weight: 600, color: ink });
+    Lab.image(g, heat, N, N, PX[2], TOP, P, P, (v, i) => {
+      const f = 0.15 + 0.85 * v;
+      return [Math.round(255 * RGB[3 * i] * f), Math.round(255 * RGB[3 * i + 1] * f), Math.round(255 * RGB[3 * i + 2] * f)];
+    });
+    g.save(); g.strokeStyle = hl; g.lineWidth = 2; g.setLineDash([3, 3]); g.strokeRect(PX[2] + cj * P / R, TOP + ci * P / R, P / R, P / R); g.setLineDash([]);
+    const sx = PX[2] + ((S.px + 0.5) / N) * P, sy = TOP + ((S.py + 0.5) / N) * P;
+    g.beginPath(); g.arc(sx, sy, 4, 0, 2 * Math.PI); g.stroke(); g.restore();
+    for (const [x, t] of [[PX[0] + P + 10, S.relu ? "ReLU" : "(none)"], [PX[1] + P + 10, "bilinear"]]) {
+      g.save(); g.strokeStyle = muted; g.fillStyle = muted; g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(x, TOP + P / 2); g.lineTo(x + 60, TOP + P / 2); g.stroke();
+      g.beginPath(); g.moveTo(x + 66, TOP + P / 2); g.lineTo(x + 58, TOP + P / 2 - 4); g.lineTo(x + 58, TOP + P / 2 + 4); g.closePath(); g.fill(); g.restore();
+      Lab.text(g, t, x + 32, TOP + P / 2 - 8, { size: 11, align: "center", color: Lab.color("--ink-2") });
+    }
+
+    // numbers
+    const idx = ci * R + cj, sv = sum[idx];
+    const y = sum.reduce((s, v) => s + v, 0) / (R * R);
+    const pos = sum.filter((v) => v > 0).length;
+    rY.set(f2(y)); rS.set(f2(sv), sv > 0 ? "good" : "bad"); rH.set(heat[S.py * N + S.px].toFixed(2)); rPos.set(`${pos} of ${R * R}`);
+    const terms = alpha.map((a, k) => `${sgn(a)}${Math.abs(a).toFixed(2)}·${A[k][idx].toFixed(2)}`);
+    Lab.$("#formula").innerHTML = [
+      `L = ReLU(Σ_k α_k A^k),  α_k = mean_ij ∂y^c/∂A^k_ij   (${R} x ${R} cells of ${cell} x ${cell} px each)`,
+      `cell (${ci}, ${cj}): ${terms.slice(0, 4).join(" ")}`,
+      `${" ".repeat(String(`cell (${ci}, ${cj}): `).length)}${terms.slice(4).join(" ")} = <b>${f2(sv)}</b>` +
+        (S.relu ? `  -> ReLU -> <b>${Math.max(0, sv).toFixed(2)}</b>` : ""),
+      `pixel (${S.py}, ${S.px}): bilinear from the 4 nearest cells, then (v - min) / (max - min) = <b>${heat[S.py * N + S.px].toFixed(2)}</b>`,
+    ].join("\n");
+    Lab.$("#cap-pipe").innerHTML = `weighted sum, ReLU, upsampling <small>hover any map: cell (${ci}, ${cj}) of ${R} x ${R}, pixel (${S.py}, ${S.px})</small>`;
+    Lab.$("#legend").innerHTML = `<span><i style="background:${Lab.color("--div-pos")}"></i>positive α / sum</span>`
+      + `<span><i style="background:${Lab.color("--div-neg")}"></i>negative</span><span><i style="background:${hl}"></i>cell under the pointer</span>`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

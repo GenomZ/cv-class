@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IoU playground</title>
+<meta name="lab-notebook" content="D2-01">
+<meta name="lab-summary" content="Drag and resize a prediction against a ground-truth box: intersection, union, enclosing box, IoU / GIoU / DIoU / CIoU live, gradient arrows, and the loss curves that show why 1 - IoU is flat once the boxes stop overlapping.">
+<meta name="lab-height" content="930">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .under { margin-top: 12px; }
+  #formula { font-size: 11.5px; }
+  table.fmt { border-collapse: collapse; font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  table.fmt th, table.fmt td { padding: 2px 10px 2px 0; text-align: left; white-space: nowrap; }
+  table.fmt th { color: var(--ink-2); font-weight: 600; }
+  table.fmt td { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--ink); }
+  table.fmt td.k { font-family: inherit; color: var(--ink-2); font-weight: 600; }
+  table.losses td, table.losses th { text-align: right; padding-right: 12px; }
+  table.losses td.k, table.losses th.k { text-align: left; }
+  table.losses th i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: 3px; }
+  table.losses td.flat { color: var(--bad); font-weight: 700; }
+  table.losses th.sel { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+  .readout { min-width: 78px; }
+  details.py summary { cursor: pointer; font-size: 12px; color: var(--accent); font-weight: 600; }
+  details.py pre { font: 11px/1.45 ui-monospace, Consolas, monospace; background: var(--wash); border-radius: 8px; padding: 7px 9px; margin: 5px 0 0; overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>IoU playground</h1><span class="lab-tag">D2-01 · sections 2-3</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Drag a box by its body, resize it by a corner. Hatched = intersection P∩G, shaded = union P∪G, dashed = C,
+    the smallest box enclosing both. The arrows on P's edges are one step of gradient descent for the chosen loss.</p>
+
+  <div class="lab-stage">
+    <div>
+      <figure class="lab-fig"><figcaption>boxes <small>image 560 × 280 px, x to the right, y downwards</small></figcaption><div id="fig-boxes"></div></figure>
+      <table class="fmt" id="formats"></table>
+      <figure class="lab-fig under"><figcaption>slide the prediction sideways <small>each loss as a function of P's horizontal position (size and height as now); drag in the plot to move P</small></figcaption><div id="fig-plot"></div></figure>
+      <table class="fmt losses" id="losses"></table>
+    </div>
+    <div class="lab-controls">
+      <div id="c-preset"></div>
+      <div class="readouts" id="readouts"></div>
+      <div class="formula" id="formula"></div>
+      <div id="c-arrows"></div>
+      <div id="c-norm"></div>
+      <div class="legend" id="legend"></div>
+      <details class="py"><summary>same numbers in Python</summary><pre id="py"></pre></details>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Make P the same size as G and slide it sideways until it covers exactly <b>half of G's width</b>. Predict the IoU before you look.
+        <details><summary>answer</summary><p>1/3, not 1/2. The intersection is half a box, the union one and a half boxes: 0.5 / 1.5.
+          IoU reaches 0.5 (the usual "hit" threshold) only when the shift is w/3: intersection 2/3, union 4/3.</p></details></li>
+      <li>Pick <b>disjoint</b>, arrows for <b>IoU</b>, then drag P further away. What happens to 1−IoU, its slope and the arrows? Now switch the arrows to <b>GIoU</b> and <b>DIoU</b>.
+        <details><summary>why</summary><p>Once the boxes stop overlapping, IoU is 0 wherever P is: 1−IoU is a flat line at 1, slope exactly 0, no arrows.
+          A network trained with it gets no signal. GIoU still changes because it penalises the empty part of C: its gradient
+          makes P <i>grow</i>, most strongly on the edge facing G, until the boxes overlap and IoU takes over (slow, which is why DIoU
+          was proposed). DIoU penalises the centre distance ρ²/c², so it slides the whole box straight at G.</p></details></li>
+      <li>Pick <b>one inside the other</b> and move P around inside G without touching G's edges. Which of IoU, GIoU, DIoU change?
+        <details><summary>why</summary><p>IoU and GIoU do not move: C is G itself and the union is G, so GIoU = IoU and neither knows where P sits.
+          Only DIoU (and CIoU) change, through ρ. This blind spot of GIoU is exactly why DIoU was proposed.</p></details></li>
+      <li>Pick <b>same centre, other shape</b>. Which metric is lower than DIoU here, and why? Then make P square.
+        <details><summary>why</summary><p>ρ = 0, so DIoU = IoU. CIoU subtracts αv, where v measures the aspect-ratio mismatch (tall G, wide P).
+          With matching aspect ratios v = 0 and CIoU = DIoU again.</p></details></li>
+      <li>The presets are the notebook's corner cases drawn 3× larger, yet every IoU equals the one in the notebook figure. Which numbers
+        here would change if everything were scaled by 2 again?
+        <details><summary>answer</summary><p>Areas grow ×4, IoU / GIoU / DIoU / CIoU do not change at all (ratios of areas and of squared lengths):
+          the IoU family is scale invariant. The L1 loss doubles: the same relative error costs more on a big box.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const W = 560, H = 280;                                    // image size in px = canvas logical units
+  // The notebook's section-2 corner cases (80 x 80 frame) drawn 3x larger at offset (160, 20): IoU is scale invariant.
+  const NB = {
+    "partial overlap": [[10, 10, 50, 50], [30, 25, 70, 65]],
+    "touching edges": [[10, 10, 40, 50], [40, 10, 70, 50]],
+    "disjoint": [[5, 5, 30, 30], [45, 40, 70, 70]],
+    "one inside the other": [[5, 5, 75, 75], [25, 25, 55, 55]],
+    "same centre, other shape": [[25, 5, 55, 75], [5, 25, 75, 55]],
+    "identical": [[10, 10, 50, 50], [10, 10, 50, 50]],
+  };
+  const PRESETS = {};
+  for (const [k, [g, p]] of Object.entries(NB)) {
+    const t = (b) => [160 + 3 * b[0], 20 + 3 * b[1], 160 + 3 * b[2], 20 + 3 * b[3]];
+    PRESETS[k] = { G: t(g), P: t(p) };
+  }
+  const S = Lab.params({ preset: "partial overlap", loss: "iou", norm: false,
+    gx1: NaN, gy1: NaN, gx2: NaN, gy2: NaN, px1: NaN, py1: NaN, px2: NaN, py2: NaN });
+  const pre = PRESETS[S.preset] || PRESETS["partial overlap"];
+  const G = [S.gx1, S.gy1, S.gx2, S.gy2].some(Number.isNaN) ? pre.G.slice() : [S.gx1, S.gy1, S.gx2, S.gy2];
+  const P = [S.px1, S.py1, S.px2, S.py2].some(Number.isNaN) ? pre.P.slice() : [S.px1, S.py1, S.px2, S.py2];
+  const boxOf = { P, G };
+
+  // ---- maths: identical formulas to cvcourse.boxes (box_iou, generalized_iou, distance_iou, complete_iou)
+  function metrics(p, g) {
+    const iw = Math.max(0, Math.min(p[2], g[2]) - Math.max(p[0], g[0]));
+    const ih = Math.max(0, Math.min(p[3], g[3]) - Math.max(p[1], g[1]));
+    const wp = p[2] - p[0], hp = p[3] - p[1], wg = g[2] - g[0], hg = g[3] - g[1];
+    const inter = iw * ih, aP = Math.max(0, wp) * Math.max(0, hp), aG = Math.max(0, wg) * Math.max(0, hg);
+    const union = aP + aG - inter;
+    const iou = union > 0 ? inter / Math.max(union, 1e-12) : 0;
+    const C = [Math.min(p[0], g[0]), Math.min(p[1], g[1]), Math.max(p[2], g[2]), Math.max(p[3], g[3])];
+    const cw = C[2] - C[0], ch = C[3] - C[1], areaC = cw * ch;
+    const giou = iou - (areaC - union) / Math.max(areaC, 1e-12);
+    const cpx = (p[0] + p[2]) / 2, cpy = (p[1] + p[3]) / 2, cgx = (g[0] + g[2]) / 2, cgy = (g[1] + g[3]) / 2;
+    const rho2 = (cpx - cgx) ** 2 + (cpy - cgy) ** 2, c2 = cw * cw + ch * ch;
+    const diou = iou - rho2 / Math.max(c2, 1e-12);
+    const v = (4 / Math.PI ** 2) * (Math.atan(wg / Math.max(hg, 1e-12)) - Math.atan(wp / Math.max(hp, 1e-12))) ** 2;
+    const alpha = v / Math.max(1 - iou + v, 1e-12);
+    const ciou = diou - alpha * v;
+    const l1 = Math.abs(p[0] - g[0]) / W + Math.abs(p[1] - g[1]) / H + Math.abs(p[2] - g[2]) / W + Math.abs(p[3] - g[3]) / H;
+    return { iw, ih, inter, aP, aG, union, iou, C, cw, ch, areaC, giou, rho2, c2, diou, v, alpha, ciou, l1,
+      wp, hp, wg, hg, cpx, cpy, cgx, cgy, dx: cpx - cgx, dy: cpy - cgy };
+  }
+  const LOSSES = [
+    { key: "l1", name: "L1", short: "L1", color: "--c6", f: (m) => m.l1, dash: [] },
+    { key: "iou", name: "1−IoU", short: "IoU", color: "--c1", f: (m) => 1 - m.iou, dash: [] },
+    { key: "giou", name: "1−GIoU", short: "GIoU", color: "--c2", f: (m) => 1 - m.giou, dash: [] },
+    { key: "diou", name: "1−DIoU", short: "DIoU", color: "--c4", f: (m) => 1 - m.diou, dash: [] },
+    // CIoU's gradient treats alpha as a constant (CIoU paper; torchvision computes alpha under no_grad)
+    { key: "ciou", name: "1−CIoU", short: "CIoU", color: "--c5", f: (m) => 1 - m.ciou, fg: (m, m0) => 1 - m.diou + m0.alpha * m.v, dash: [5, 4] },
+  ];
+  const lossByKey = Object.fromEntries(LOSSES.map((l) => [l.key, l]));
+  const EPS = 0.01;                                          // central differences: kinks only at integer alignments
+  const fGrad = (loss, a, g, m0) => (loss.fg ? loss.fg(metrics(a, g), m0) : loss.f(metrics(a, g)));
+  function grad(loss, p, g) {                                // dL / d(x1, y1, x2, y2) of the prediction
+    const m0 = metrics(p, g);
+    return [0, 1, 2, 3].map((k) => {
+      const a = p.slice(), b = p.slice(); a[k] += EPS; b[k] -= EPS;
+      return (fGrad(loss, a, g, m0) - fGrad(loss, b, g, m0)) / (2 * EPS);
+    });
+  }
+  function slopeX(loss, p, g) {                              // d L / d(horizontal shift of the whole box), central + one-sided
+    const m0 = metrics(p, g), at = (d) => fGrad(loss, [p[0] + d, p[1], p[2] + d, p[3]], g, m0);
+    const c = at(0), right = (at(EPS) - c) / EPS, left = (c - at(-EPS)) / EPS;
+    return { s: (at(EPS) - at(-EPS)) / (2 * EPS), flat: Math.abs(right) < 1e-9 && Math.abs(left) < 1e-9, min: left < 0 && right > 0, max: left > 0 && right < 0 };
+  }
+
+  // ---- canvases and controls
+  const cb = Lab.canvas("#fig-boxes", W, H, { framed: true });
+  const cp = Lab.canvas("#fig-plot", W, 190);
+  const presetSel = Lab.select("#c-preset", { label: "preset (the notebook's corner cases)", options: [...Object.keys(PRESETS), "custom"],
+    value: PRESETS[S.preset] ? S.preset : "partial overlap",
+    onChange: (v) => { if (PRESETS[v]) { G.splice(0, 4, ...PRESETS[v].G); P.splice(0, 4, ...PRESETS[v].P); redraw(); } } });
+  if (![S.gx1, S.px1].every(Number.isNaN)) presetSel.set("custom");
+  const tiles = {};
+  for (const [k, lab] of [["inter", "|P∩G| px²"], ["union", "|P∪G| px²"], ["iou", "IoU"], ["giou", "GIoU"], ["diou", "DIoU"], ["ciou", "CIoU"]])
+    tiles[k] = Lab.readout("#readouts", lab);
+  Lab.segmented("#c-arrows", { label: "gradient arrows: −∂L/∂(edges of P) for", options: LOSSES.map((l) => ({ value: l.key, label: l.short })),
+    value: lossByKey[S.loss] ? S.loss : "iou", onChange: (v) => { S.loss = v; redraw(); } });
+  if (!lossByKey[S.loss]) S.loss = "iou";
+  Lab.toggle("#c-norm", { label: "formats normalised by the image size (0..1)", value: S.norm, onChange: (v) => { S.norm = v; redraw(); } });
+
+  // ---- pointer: corners resize, bodies move (P is on top)
+  const MIN = 6, GRAB = 9;
+  let drag = null;
+  function hit(p) {
+    for (const name of ["P", "G"]) {
+      const b = boxOf[name];
+      for (const [ix, iy] of [[0, 1], [2, 1], [0, 3], [2, 3]])
+        if (Math.abs(p.x - b[ix]) <= GRAB && Math.abs(p.y - b[iy]) <= GRAB) return { name, ix, iy };
+    }
+    for (const name of ["P", "G"]) { const b = boxOf[name]; if (p.x >= b[0] && p.x <= b[2] && p.y >= b[1] && p.y <= b[3]) return { name }; }
+    return null;
+  }
+  Lab.pointer(cb, {
+    down(p) { const h = hit(p); if (h) drag = { ...h, start: p, orig: boxOf[h.name].slice() }; },
+    move(p) {
+      if (!drag) return;
+      const b = boxOf[drag.name];
+      if (drag.ix !== undefined) {
+        const x = Math.round(Lab.clamp(p.x, 0, W)), y = Math.round(Lab.clamp(p.y, 0, H));
+        if (drag.ix === 0) b[0] = Math.min(x, b[2] - MIN); else b[2] = Math.max(x, b[0] + MIN);
+        if (drag.iy === 1) b[1] = Math.min(y, b[3] - MIN); else b[3] = Math.max(y, b[1] + MIN);
+      } else {
+        const o = drag.orig;
+        const dx = Lab.clamp(Math.round(p.x - drag.start.x), -o[0], W - o[2]), dy = Lab.clamp(Math.round(p.y - drag.start.y), -o[1], H - o[3]);
+        b.splice(0, 4, o[0] + dx, o[1] + dy, o[2] + dx, o[3] + dy);
+      }
+      presetSel.set("custom"); redraw();
+    },
+    up() { drag = null; },
+    hover(p) {
+      const h = hit(p);
+      cb.canvas.style.cursor = !h ? "default" : h.ix === undefined ? "move" : (h.ix === 0) === (h.iy === 1) ? "nwse-resize" : "nesw-resize";
+    },
+  });
+  let plotAx = null;
+  const slideTo = (p) => {
+    if (!plotAx) return;
+    const m = metrics(P, G), w = P[2] - P[0];
+    const x1 = Math.round(Lab.clamp(m.cgx + plotAx.ix(p.x) - w / 2, 0, W - w));
+    P[0] = x1; P[2] = x1 + w; presetSel.set("custom"); redraw();
+  };
+  Lab.pointer(cp, { down: slideTo, move: slideTo });
+
+  // ---- drawing helpers
+  function arrow(ctx, x, y, dx, dy, color) {
+    const len = Math.hypot(dx, dy); if (len < 0.5) return;
+    const ux = dx / len, uy = dy / len, hx = x + dx, hy = y + dy, hs = Math.min(7, 3 + len / 3);
+    ctx.save(); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2.2; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(hx - ux * hs * 0.8, hy - uy * hs * 0.8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(hx - ux * hs - uy * hs * 0.6, hy - uy * hs + ux * hs * 0.6);
+    ctx.lineTo(hx - ux * hs + uy * hs * 0.6, hy - uy * hs - ux * hs * 0.6); ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+  function chip(ctx, text, x, y, color, below) {
+    ctx.save(); ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", sans-serif';
+    const tw = ctx.measureText(text).width + 8;
+    let cx = Lab.clamp(x - 1, 0, W - tw), cy = below ? y + 1 : y - 16;
+    if (cy < 0) cy = y + 1; if (cy > H - 16) cy = y - 17;
+    ctx.fillStyle = color; ctx.fillRect(cx, cy, tw, 16);
+    ctx.fillStyle = "#fff"; ctx.textBaseline = "middle"; ctx.fillText(text, cx + 4, cy + 8.5); ctx.restore();
+  }
+  const n0 = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+  const f3 = (v) => (Math.abs(v) < 5e-4 ? "0.000" : v.toFixed(3)).replace("-", "−");
+  const sl = (v) => (Math.abs(v) < 1e-9 ? "0" : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(4));
+
+  function drawBoxes(m) {
+    const ctx = cb.ctx; cb.clear();
+    const ink = Lab.color("--ink"), muted = Lab.color("--muted"), cP = Lab.color("--c1"), cG = Lab.color("--c3");
+    // grid with pixel ticks
+    ctx.save(); ctx.strokeStyle = Lab.color("--grid"); ctx.lineWidth = 1;
+    for (let x = 40; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); ctx.stroke(); }
+    for (let y = 40; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke(); }
+    ctx.restore();
+    for (let x = 80; x < W; x += 80) Lab.text(ctx, String(x), x + 3, 11, { size: 10, color: muted });
+    for (let y = 80; y < H; y += 80) Lab.text(ctx, String(y), 3, y - 3, { size: 10, color: muted });
+    Lab.text(ctx, "0", 3, 11, { size: 10, color: muted });
+    // union (light) and intersection (dark)
+    ctx.save(); ctx.fillStyle = Lab.alpha("--ink", 0.075);
+    ctx.beginPath(); ctx.rect(G[0], G[1], m.wg, m.hg); ctx.rect(P[0], P[1], m.wp, m.hp); ctx.fill("nonzero");
+    if (m.inter > 0) {
+      const ix = Math.max(P[0], G[0]), iy = Math.max(P[1], G[1]);
+      ctx.fillStyle = Lab.alpha("--ink", 0.10); ctx.fillRect(ix, iy, m.iw, m.ih);
+      ctx.beginPath(); ctx.rect(ix, iy, m.iw, m.ih); ctx.clip();
+      ctx.strokeStyle = Lab.alpha("--ink", 0.30); ctx.lineWidth = 1;
+      for (let s = -H; s < W + H; s += 7) { ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(s + H, H); ctx.stroke(); }
+    }
+    ctx.restore();
+    // enclosing box C, its diagonal c, the centre distance rho
+    ctx.save(); ctx.strokeStyle = Lab.color("--ink-2"); ctx.lineWidth = 1.3; ctx.setLineDash([6, 4]);
+    ctx.strokeRect(m.C[0] - 0.5, m.C[1] - 0.5, m.cw + 1, m.ch + 1);
+    ctx.strokeStyle = muted; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(m.C[0], m.C[1]); ctx.lineTo(m.C[2], m.C[3]); ctx.stroke(); ctx.restore();
+    Lab.text(ctx, "C", m.C[2] - 4, m.C[3] - 5, { size: 12, weight: 700, align: "right", color: Lab.color("--ink-2") });
+    Lab.text(ctx, "c", (m.C[0] + m.C[2]) / 2 + 0.25 * m.cw + 4, (m.C[1] + m.C[3]) / 2 + 0.25 * m.ch, { size: 11, color: muted, mono: true });
+    // boxes
+    Lab.box(ctx, G, { color: cG, width: 2.5 }); Lab.box(ctx, P, { color: cP, width: 2.5 });
+    ctx.save(); ctx.strokeStyle = ink; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(m.cpx, m.cpy); ctx.lineTo(m.cgx, m.cgy); ctx.stroke(); ctx.restore();
+    for (const [x, y, c] of [[m.cgx, m.cgy, cG], [m.cpx, m.cpy, cP]]) {
+      ctx.save(); ctx.fillStyle = c; ctx.strokeStyle = Lab.color("--surface"); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI); ctx.fill(); ctx.stroke(); ctx.restore();
+    }
+    if (m.rho2 > 400) Lab.text(ctx, "ρ", (m.cpx + m.cgx) / 2 + 5, (m.cpy + m.cgy) / 2 - 5, { size: 13, weight: 700, color: ink });
+    // corner handles
+    for (const [b, c] of [[G, cG], [P, cP]]) for (const [ix, iy] of [[0, 1], [2, 1], [0, 3], [2, 3]]) {
+      ctx.save(); ctx.fillStyle = c; ctx.strokeStyle = Lab.color("--surface"); ctx.lineWidth = 1;
+      ctx.fillRect(b[ix] - 3.5, b[iy] - 3.5, 7, 7); ctx.strokeRect(b[ix] - 3.5, b[iy] - 3.5, 7, 7); ctx.restore();
+    }
+    chip(ctx, "G  ground truth", G[0], G[3], cG, true);
+    chip(ctx, "P  prediction", P[0], P[1], cP, false);
+    // gradient arrows on the four edges of P (drawn last, on top of the chips)
+    const loss = lossByKey[S.loss], g = grad(loss, P, G), K = 6000;
+    const L = (v) => { const a = Math.abs(v) * K; return a < 1e-6 ? 0 : Math.min(60, Math.max(7, a)); };
+    const xm = (P[0] + P[2]) / 2, ym = (P[1] + P[3]) / 2;
+    if (g.every((v) => Math.abs(v) < 1e-9)) {
+      const ty = P[3] + 30 < H ? P[3] + 30 : P[1] - 24;
+      Lab.text(ctx, `∇(${loss.name}) = 0: no direction to move`, Lab.clamp(xm, 120, W - 120), ty, { size: 12, weight: 700, color: Lab.color("--bad"), align: "center" });
+    } else {
+      arrow(ctx, P[0], ym, -Math.sign(g[0]) * L(g[0]), 0, ink);
+      arrow(ctx, xm, P[1], 0, -Math.sign(g[1]) * L(g[1]), ink);
+      arrow(ctx, P[2], ym, -Math.sign(g[2]) * L(g[2]), 0, ink);
+      arrow(ctx, xm, P[3], 0, -Math.sign(g[3]) * L(g[3]), ink);
+    }
+    return g;
+  }
+
+  function drawPlot(m) {
+    const ctx = cp.ctx; cp.clear();
+    const lo = m.wp / 2 - m.cgx, hi = W - m.wp / 2 - m.cgx;
+    const xmin = Math.min(lo, -10), xmax = Math.max(hi, 10);
+    const step = (xmax - xmin) > 500 ? 200 : 100, xt = [];
+    for (let t = Math.ceil(xmin / step) * step; t <= xmax; t += step) xt.push(t);
+    const ax = Lab.axes(ctx, { x: 46, y: 8, w: W - 58, h: 140, xmin, xmax, ymin: 0, ymax: 2, xticks: xt, yticks: [0, 0.5, 1, 1.5, 2],
+      xlabel: "offset of P's centre from G's centre (px)", ylabel: "loss" });
+    plotAx = ax;
+    const N = 280, xs = [], ms = [];
+    for (let i = 0; i <= N; i++) {
+      const d = xmin + ((xmax - xmin) * i) / N, x1 = m.cgx + d - m.wp / 2;
+      xs.push(d); ms.push(metrics([x1, P[1], x1 + m.wp, P[3]], G));
+    }
+    // shade the offsets where the boxes do not overlap (1 - IoU flat)
+    ctx.save(); ctx.fillStyle = Lab.alpha("--ink", 0.05);
+    let start = null;
+    const flush = (end) => { if (start !== null) { ctx.fillRect(ax.sx(start), 8, ax.sx(end) - ax.sx(start), 140); start = null; } };
+    ms.forEach((mm, i) => { if (mm.iou === 0) { if (start === null) start = xs[i]; } else flush(xs[i]); });
+    flush(xs[xs.length - 1]); ctx.restore();
+    const noOverlap = ms.findIndex((mm) => mm.iou === 0);
+    if (noOverlap >= 0) Lab.text(ctx, "no overlap", ax.sx(xs[noOverlap]) + 4, 20, { size: 10.5, color: Lab.color("--muted") });
+    for (const l of LOSSES) ax.line(ms.map((mm, i) => [xs[i], l.f(mm)]), Lab.color(l.color), l.key === S.loss ? 3.2 : l.key === "ciou" ? 1.6 : 2, l.dash);
+    // current offset
+    const hl = Lab.color("--hl");
+    ctx.save(); ctx.strokeStyle = hl; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(ax.sx(m.dx), 8); ctx.lineTo(ax.sx(m.dx), 148); ctx.stroke(); ctx.restore();
+    for (const l of LOSSES) { const v = l.f(m); if (v <= 2.02) ax.dot(m.dx, v, Lab.color(l.color), 4.5); }
+  }
+
+  function draw() {
+    const m = metrics(P, G);
+    drawBoxes(m); drawPlot(m);
+    tiles.inter.set(n0(m.inter)); tiles.union.set(n0(m.union));
+    tiles.iou.set(f3(m.iou), m.iou >= 0.5 ? "good" : ""); tiles.giou.set(f3(m.giou)); tiles.diou.set(f3(m.diou)); tiles.ciou.set(f3(m.ciou));
+
+    const sc = S.norm ? [W, H, W, H] : [1, 1, 1, 1];
+    const fmtB = (b) => "(" + b.map((v, i) => (S.norm ? (v / sc[i]).toFixed(3) : n0(v))).join(", ") + ")";
+    const forms = (b) => ({ xyxy: b, xywh: [b[0], b[1], b[2] - b[0], b[3] - b[1]], cxcywh: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[2] - b[0], b[3] - b[1]] });
+    const fP = forms(P), fG = forms(G);
+    Lab.$("#formats").innerHTML = `<tr><th></th><th>P  prediction</th><th>G  ground truth</th></tr>` +
+      ["xyxy", "xywh", "cxcywh"].map((k) => `<tr><td class="k">${k}</td><td>${fmtB(fP[k])}</td><td>${fmtB(fG[k])}</td></tr>`).join("");
+
+    const sel = S.loss;
+    Lab.$("#losses").innerHTML =
+      `<tr><th class="k"></th>${LOSSES.map((l) => `<th class="${l.key === sel ? "sel" : ""}"><i style="background:${Lab.color(l.color)}"></i>${l.name}</th>`).join("")}</tr>` +
+      `<tr><td class="k">loss</td>${LOSSES.map((l) => `<td>${f3(l.f(m))}</td>`).join("")}</tr>` +
+      `<tr><td class="k" title="derivative of the loss for moving P 1 px to the right: what backprop sends to the box (CIoU: alpha held constant, as in torchvision)">slope ∂L/∂x per px</td>${LOSSES.map((l) => {
+        const { s, flat, min, max } = slopeX(l, P, G);
+        const txt = flat ? "0 (flat)" : Math.abs(s) < 1e-9 ? (min ? "0 (min)" : max ? "0 (max)" : "0") : sl(s);
+        return `<td class="${flat ? "flat" : ""}">${txt}</td>`;
+      }).join("")}</tr>`;
+
+    const r3 = (v) => v.toFixed(3);
+    const neg = (v) => (v < 0 ? `(${n0(v)})` : n0(v));
+    Lab.$("#formula").innerHTML =
+      `|P∩G| = ${n0(m.iw)} × ${n0(m.ih)} = ${n0(m.inter)}\n` +
+      `|P∪G| = ${n0(m.aP)}+${n0(m.aG)}−${n0(m.inter)} = ${n0(m.union)}\n` +
+      `IoU  = ${n0(m.inter)}/${n0(m.union)} = <b>${f3(m.iou)}</b>\n` +
+      `|C|  = ${n0(m.cw)} × ${n0(m.ch)} = ${n0(m.areaC)}\n` +
+      `GIoU = IoU − (|C|−|P∪G|)/|C|\n` +
+      `     = ${r3(m.iou)} − ${n0(m.areaC - m.union)}/${n0(m.areaC)} = <b>${f3(m.giou)}</b>\n` +
+      `ρ² = ${neg(m.dx)}²+${neg(m.dy)}² = ${n0(m.rho2)}\n` +
+      `c² = ${n0(m.cw)}²+${n0(m.ch)}² = ${n0(m.c2)}\n` +
+      `DIoU = IoU − ρ²/c²\n` +
+      `     = ${r3(m.iou)} − ${r3(m.rho2 / m.c2)} = <b>${f3(m.diou)}</b>\n` +
+      `v = 4/π²(atan(wG/hG)−atan(wP/hP))²\n` +
+      `  = 4/π²(${r3(Math.atan(m.wg / m.hg))}−${r3(Math.atan(m.wp / m.hp))})² = ${r3(m.v)}\n` +
+      `α = v/(1−IoU+v) = ${r3(m.alpha)}\n` +
+      `CIoU = DIoU − αv = <b>${f3(m.ciou)}</b>`;
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${Lab.color("--c3")}"></i>G ground truth</span><span><i style="background:${Lab.color("--c1")}"></i>P prediction</span>` +
+      `<span><i style="background:${Lab.alpha("--ink", 0.35)}"></i>P∩G (hatched)</span><span><i style="background:${Lab.alpha("--ink", 0.1)}"></i>P∪G</span>` +
+      `<span>- - - C, dotted: its diagonal c; ρ joins the centres</span>`;
+    const py = (b) => `[${b.map(n0).join(", ")}]`;
+    Lab.$("#py").textContent =
+      `P = np.array([${py(P)}], float)\nG = np.array([${py(G)}], float)\n` +
+      `boxes.box_iou(P, G)[0, 0]       # ${m.iou.toFixed(4)}\n` +
+      `boxes.generalized_iou(P, G)[0]  # ${m.giou.toFixed(4)}\n` +
+      `boxes.distance_iou(P, G)[0]     # ${m.diou.toFixed(4)}\n` +
+      `boxes.complete_iou(P, G)[0]     # ${m.ciou.toFixed(4)}\n` +
+      `torchvision.ops.generalized_box_iou_loss(\n    torch.tensor(P), torch.tensor(G))  # 1 - GIoU`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

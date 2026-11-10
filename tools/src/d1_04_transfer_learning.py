@@ -30,7 +30,7 @@ CELLS = [
     ## 0 · Setup
 
     The course standard backbone is **ResNet-50** at 224 px on a GPU. On a CPU-only laptop the
-    same cells use **ResNet-18 at 160 px** (about 8x cheaper) so the whole notebook runs in a few
+    same cells use **ResNet-18 at 160 px** (0.9 instead of 4.1 G multiply-adds per image) so the whole notebook runs in a few
     minutes; every number in the text is given for both. Expensive results (features, fine-tuned
     weights) are cached in `data/checkpoints/` and reused when you re-run the notebook.
     """),
@@ -50,7 +50,7 @@ CELLS = [
     import torchvision
     from torchvision.transforms import v2
     from torchvision.models import get_model, get_model_weights
-    from cvcourse import viz, tests, torchkit, day1
+    from cvcourse import viz, tests, torchkit, day1, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -219,12 +219,26 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Each row is one regime: orange stages receive gradient updates, blue ones are frozen. A and B train
+    the same thing (the head); they differ in whether the features are cached once or recomputed from
+    augmented images every epoch. The red numbers at the bottom are the learning rates of the discriminative
+    schedule in C'.
+
+    ### Lab · Freeze, unfreeze, discriminative LRs
+    **Predict first:** in regime C you freeze `stem`, `layer1` and `layer2` of ResNet-50. Roughly what
+    fraction of its parameters is still trained: a quarter, a half, or more? The lab shows the six stages
+    with their true parameter counts; click to freeze / unfreeze and move the LR sliders (4 minutes).
+    """),
+    code(r"""
+    labs.show("freeze-unfreeze")
+    """),
+    md(r"""
     ### Exercise 2 · `freeze(model, until)`
 
     For a torchvision ResNet, set `requires_grad = False` for every parameter of the stages up to
     and including `until` and `True` for the later ones. Stage of a parameter = first part of its
     name, with `conv1` / `bn1` meaning `"stem"`. Order: `stem, layer1, layer2, layer3, layer4, fc`.
-    Return the model.
+    Return the model. (`until` is the lab's "freeze until" selector: everything up to the dashed line.)
     """),
     exercise(
         stub=r"""
@@ -262,7 +276,8 @@ CELLS = [
     `lr = base_lr * decay ** (5 - i)` where `i` is the stage index in `ORDER` (so `fc` gets
     `base_lr`, `layer4` `base_lr * decay`, ...). Skip frozen parameters and empty groups. Each
     group is a dict `{"params": [...], "lr": ..., "name": stage}` - `torch.optim.AdamW` accepts
-    such a list directly.
+    such a list directly. The bars in the lab's learning-rate panel are exactly these `lr` values,
+    one per returned group.
     """),
     exercise(
         stub=r"""
@@ -527,9 +542,10 @@ CELLS = [
     md(r"""
     ## 6 · Grad-CAM: where does the network look?
 
-    Grad-CAM (Selvaraju et al., 2017) answers "which regions made the network say class $c$?"
+    Section 5 showed *what* the features look like; Grad-CAM asks *which* of them, and where, made one
+    particular prediction. It (Selvaraju et al., 2017) answers "which regions made the network say class $c$?"
     using the last convolutional feature maps $A^k$ (here `layer4`, 512 or 2048 channels at
-    $\tfrac{1}{32}$ resolution). Weight each channel by how much the class score $y^c$ increases
+    $\tfrac{1}{32}$ resolution: 7 x 7 for a 224 px image, 5 x 5 at 160 px). Weight each channel by how much the class score $y^c$ increases
     with it, averaged over space, keep the positive evidence:
 
     $$\alpha_k^c = \frac{1}{HW}\sum_{i,j} \frac{\partial y^c}{\partial A^k_{ij}}, \qquad
@@ -539,13 +555,26 @@ CELLS = [
     with **hooks**: `layer.register_forward_hook(fn)` calls `fn(module, input, output)` on every
     forward pass; inside it, `output.register_hook(g)` calls `g(grad)` when the gradient w.r.t.
     that tensor is computed. Always `remove()` hooks when done.
-
+    """),
+    md(r"""
+    ### Lab · Grad-CAM by hand
+    **Predict first:** what goes wrong if you leave out the ReLU: does the heat map just get a little
+    noisier, or can it light up regions that have nothing to do with the class? The lab builds the
+    weighted sum from eight hand-made feature maps of a photo, so every $\alpha_k$, $A^k$, the sum,
+    the ReLU and the upsampling are visible (4 minutes).
+    """),
+    code(r"""
+    labs.show("gradcam-by-hand")
+    """),
+    md(r"""
     ### Exercise 5 · `gradcam(model, target_layer, x, class_idx)`
 
     `x` is one image `(3, H, W)`. Register the forward hook, run the model in eval mode, pick
     `class_idx` (the argmax if `None`), backpropagate `logits[0, class_idx]`, compute the map,
     upsample with `F.interpolate(..., size=x.shape[-2:], mode="bilinear", align_corners=False)`,
-    min-max scale to [0, 1], return a NumPy `(H, W)` array.
+    min-max scale to [0, 1], return a NumPy `(H, W)` array. Shapes on the way: activations and
+    gradients `(1, K, h, w)`, weights $\alpha$ `(1, K, 1, 1)`, map `(1, 1, h, w)` before upsampling
+    (the lab's "ReLU of the sum" panel), `(H, W)` after.
     """),
     exercise(
         stub=r"""
@@ -615,6 +644,10 @@ CELLS = [
     plt.suptitle("Grad-CAM of the predicted class (top: image, bottom: heat map)", y=1.02); plt.tight_layout(); plt.show()
     """),
     md(r"""
+    Look at where the heat sits: on most correct predictions it covers the head; on the wrong ones it is
+    often spread out or partly on the background. A few pictures are an impression, not evidence - the
+    next cell turns the question into two measurements.
+
     ### Is it looking at the pet? A shortcut-learning check
 
     A model can be right for the wrong reason: snow -> husky, a sofa -> cat, a hospital's

@@ -40,7 +40,7 @@ CELLS = [
     from matplotlib.patches import FancyBboxPatch, Rectangle
     import torch, torch.nn as nn, torch.nn.functional as F
     import torchvision
-    from cvcourse import viz, tests, torchkit, day1
+    from cvcourse import viz, tests, torchkit, day1, labs
 
     %matplotlib inline
     plt.rcParams["figure.dpi"] = 90
@@ -108,7 +108,8 @@ CELLS = [
     Three things to read off the scatter:
 
     * **Size is not accuracy.** VGG-16 has 26x the parameters of EfficientNet-B0 and is 6 points worse.
-      Most of VGG's parameters sit in its fully-connected head (global average pooling killed that).
+      Most of VGG's parameters sit in its fully-connected head; later networks replaced that head by
+      *global average pooling* (average each channel over all positions, then one small linear layer).
     * **Architecture is not everything.** The same ResNet-50 gains ~5 points from a 2021 training
       recipe (longer schedule, AdamW / LAMB, RandAugment, Mixup / CutMix, label smoothing - the D1-02
       toolbox). Compare architectures only under the same recipe.
@@ -299,6 +300,10 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    In both blocks the green identity shortcut skips the whole main path and is added at `+`, before
+    the last ReLU. In the bottleneck the expensive 3x3 conv works on only 64 channels, between a
+    cheap 1x1 that reduces 256 -> 64 and another that expands back to 256.
+
     ### Exercise 3 · `BasicBlock`
 
     The main path is given. Add the shortcut: `nn.Identity()` when the shape does not change,
@@ -448,7 +453,19 @@ CELLS = [
     deep plain nets with BN still train badly (the 2015 paper's "degradation problem"). Residual +
     BN stays flat at every depth: 152 (and 1 000) layers train fine. Every modern
     architecture - ConvNeXt, ViT, U-Net decoders, LLMs - has residual connections.
-
+    """),
+    md(r"""
+    ### Lab · Gradient flow, live
+    **Predict first:** the figure used PyTorch's default initialisation. With **He** initialisation
+    (designed to keep the signal size constant through ReLU layers) and no BatchNorm, does the plain
+    net still lose its gradient at depth 60? And does the residual net stay flat? The lab runs the same
+    experiment with fully-connected layers, one real backward pass per change; work through its
+    "Try this" list (5 minutes).
+    """),
+    code(r"""
+    labs.show("gradient-flow")
+    """),
+    md(r"""
     ### Residual (add) vs. dense (concatenate)
 
     DenseNet (2017) connects each layer to **all** previous ones by *concatenation*: layer $l$ gets
@@ -483,12 +500,18 @@ CELLS = [
     axes[2].set_xticks(range(5))
     plt.tight_layout(); plt.show()
     """),
+    md(r"""
+    The residual chain keeps 64 channels (every block adds into the same tensor); each dense layer
+    appends 32 new channels, so after 4 layers the tensor is 64 + 4 x 32 = 192 channels wide, and
+    every later layer reads all of them.
+    """),
 
     # ------------------------------------------------------------------ 5
     md(r"""
     ## 5 · Efficiency: depthwise-separable convolutions, SE, EfficientNet, ConvNeXt
 
-    A standard 3x3 conv mixes **space and channels at once**: $C_{\text{in}} \cdot C_{\text{out}} \cdot 9$
+    Residual connections made depth trainable; the remaining question is what each block *costs* in
+    parameters and compute. A standard 3x3 conv mixes **space and channels at once**: $C_{\text{in}} \cdot C_{\text{out}} \cdot 9$
     weights. MobileNet (2017) factorises it into
 
     1. a **depthwise** 3x3 conv: one 3x3 filter *per input channel* (`groups=C_in`), space only: $9\,C_{\text{in}}$ weights;
@@ -496,11 +519,24 @@ CELLS = [
 
     The cost ratio is $\frac{1}{C_{\text{out}}} + \frac{1}{9}$: about 8-9x fewer parameters and
     multiply-adds for typical widths, for a small accuracy loss.
-
+    """),
+    md(r"""
+    ### Lab · What does a block cost?
+    **Predict first:** at 512 channels in and out, you switch the kernel from 3x3 to 7x7. How many
+    times more weights does a standard conv need? And a depthwise-separable block? The lab puts the
+    standard conv, the ResNet bottleneck, the depthwise-separable block and an Inception-style
+    1x1 -> kxk branch side by side for the same input, with every formula filled in (5 minutes).
+    """),
+    code(r"""
+    labs.show("block-cost")
+    """),
+    md(r"""
     ### Exercise 5 · `DepthwiseSeparable`
 
     `depthwise` (3x3, `groups=c_in`, stride, padding 1, no bias) - `bn1` - ReLU - `pointwise`
-    (1x1, no bias) - `bn2` - ReLU. The checker counts parameters.
+    (1x1, no bias) - `bn2` - ReLU. The checker counts parameters: $9\,C_{\text{in}} + C_{\text{in}} C_{\text{out}}$
+    conv weights plus 2 per channel for each BatchNorm (the lab's numbers with "count BatchNorm" on).
+    In the lab, `depthwise` is the yellow segment and `pointwise` the orange one.
     """),
     exercise(
         stub=r"""
@@ -546,6 +582,9 @@ CELLS = [
     plt.tight_layout(); plt.show()
     """),
     md(r"""
+    The saving printed on each bar grows with the width (7x at 32 channels, 8.8x at 512) towards its
+    limit $k^2 = 9$: at large widths almost all of the remaining cost is the 1x1 pointwise conv.
+
     **Squeeze-and-excitation** (SE, 2018) adds cheap *channel attention*: global-average-pool each
     channel to one number ("squeeze"), pass the vector through a tiny 2-layer MLP with a sigmoid
     ("excite"), and multiply each channel by its weight in (0, 1). The block learns to turn
@@ -585,9 +624,11 @@ CELLS = [
     ax.set_xlim(75, 83); ax.set_xlabel("ImageNet top-1 (%)"); ax.set_title("Modernising a ResNet into ConvNeXt (Liu et al. 2022, Fig. 2); red = training recipe alone")
     ax.grid(alpha=.3, axis="x"); plt.tight_layout(); plt.show()
     """),
-
-    # ------------------------------------------------------------------ 6
     md(r"""
+    Read the bars top to bottom: the largest single step (+2.7 points) is the training recipe, with no
+    change to the network; the eleven design changes add +3.2 together, most of them a few tenths
+    each (one, moving the depthwise conv up, even costs 0.7 before the 7x7 kernel wins it back).
+
     ## 6 · Reading a model
 
     `torchkit.summarize(model, input_size)` registers forward hooks on every module, runs a dummy

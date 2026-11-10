@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMS playground</title>
+<meta name="lab-notebook" content="D2-01">
+<meta name="lab-summary" content="Step through greedy NMS, linear / Gaussian Soft-NMS and class-wise NMS on scored candidate boxes; drag boxes, move the IoU and score thresholds, and see when NMS deletes a real object.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .lab-controls.row { margin-bottom: 10px; }
+  .lab-controls.row .ctl { min-width: 165px; }
+  .lab-figs { gap: 16px; }
+  .side { width: 410px; max-width: 100%; display: flex; flex-direction: column; gap: 8px; }
+  #story { font-size: 12.5px; color: var(--ink-2); background: var(--wash); border-radius: 8px; padding: 7px 10px; min-height: 52px; }
+  #story b { color: var(--ink); }
+  table.nms { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+  table.nms th { text-align: left; color: var(--ink-2); font-weight: 600; font-size: 11.5px; padding: 2px 6px; border-bottom: 1px solid var(--grid); }
+  table.nms td { padding: 1px 6px; border-bottom: 1px solid var(--grid); white-space: nowrap; line-height: 1.35; }
+  table.nms td.n { text-align: right; }
+  table.nms tr.hover td { background: var(--wash); }
+  table.nms tr.cur td { background: var(--wash); font-weight: 650; }
+  table.nms td.kept { color: var(--good-ink); font-weight: 650; }
+  table.nms td.removed { color: var(--bad); }
+  table.nms td.below, table.nms td.wait { color: var(--muted); }
+  table.nms i.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  details.py summary { cursor: pointer; font-size: 12px; color: var(--accent); font-weight: 600; }
+  details.py pre { font: 11px/1.45 ui-monospace, Consolas, monospace; background: var(--wash); border-radius: 8px; padding: 7px 9px; margin: 5px 0 0; overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>NMS playground</h1><span class="lab-tag">D2-01 · section 7</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">The detector fired several times on every object (the green shapes A, B, …). Press <b>step</b> to watch NMS pick
+    one box at a time, drag any box, move the thresholds. "Found" = objects matched by a kept box with IoU ≥ 0.5.</p>
+
+  <div class="lab-stage wide">
+    <div class="lab-controls row" id="ctl1"></div>
+    <div class="lab-controls row" id="ctl2"></div>
+    <div class="lab-figs">
+      <figure class="lab-fig"><figcaption id="cap">candidates</figcaption><div id="fig"></div>
+        <div class="legend" id="legend" style="margin-top:6px; max-width:520px"></div></figure>
+      <div class="side">
+        <div class="readouts" id="readouts"></div>
+        <div id="story"></div>
+        <table class="nms" id="table"></table>
+        <details class="py"><summary>this scene in Python (check your own nms)</summary><pre id="py"></pre></details>
+      </div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Street, greedy NMS: press <b>step</b> until done. Then predict what goes wrong at IoU threshold 0.30, and at 0.70.
+        <details><summary>why</summary><p>At 0.30 the best box on person A also removes every box on person B (A and B overlap with IoU 0.43): a real
+          object is deleted. At 0.70 some duplicates overlap their kept box less than that and survive as false positives. 0.40-0.55 is right;
+          the one false positive left (#12) is a background detection, which NMS cannot remove: raise the score threshold above 0.34 instead.</p></details></li>
+      <li>Switch to <b>crowd</b>: the notebook's four boxes, people A and B overlap with IoU 0.61. Find an IoU threshold that keeps both people
+        and no duplicate. Is it still right for the street scene?
+        <details><summary>why</summary><p>0.60-0.80 works here, but at 0.60 the street scene already keeps a horse duplicate (IoU 0.58 with the kept horse box).
+          Greedy NMS uses one threshold for every image, and crowded images need a different one.</p></details></li>
+      <li>Stay on <b>crowd</b>, IoU threshold back to 0.50, and switch to <b>Soft-NMS Gaussian</b>. Step through and watch the "now" column.
+        Why does person B survive while the duplicates do not?
+        <details><summary>why</summary><p>Each kept box decays the others by exp(−IoU²/σ). B's best box overlaps A's with IoU 0.58, so its score only halves
+          (0.90 → 0.46); A's duplicate overlaps with 0.85 and drops to 0.19, under the score threshold. Set the score threshold to 0 and nothing is
+          removed, only re-ranked: 0.95, 0.46, 0.08, 0.02, the notebook's Soft-NMS figure (#1-#4 here are #0-#3 there).</p></details></li>
+      <li>Scene <b>person + horse</b>, greedy NMS, class-agnostic. Where did the horse go? Now switch to class-wise.
+        <details><summary>why</summary><p>The person stands in front of the horse and their boxes overlap with IoU ≈ 0.6, so class-agnostic NMS treats the horse
+          as a duplicate of the person. Class-wise NMS (torchvision's batched_nms) only compares boxes of the same class.</p></details></li>
+      <li>Drag a duplicate away from its object until it is no longer removed. Does it then count as a found object?
+        <details><summary>why</summary><p>It survives once its IoU with every kept box is below the threshold, and becomes a false positive: NMS removes
+          overlaps, it does not judge quality. "New random scene" gives more cases to predict.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const W = 520, H = 330;
+  const CLASSES = [{ name: "person", color: "--c1" }, { name: "horse", color: "--c2" }];
+  const S = Lab.params({ scene: "street", seed: 1, mode: "greedy", classwise: false, iou: 0.5, score: 0.3, sigma: 0.5, step: -1 });
+
+  // ---- scenes: ground truth (gt, gl) and candidates (b, s, c). Box ids are #1.. in list order.
+  const SCENES = {
+    street: {
+      title: "street: two people close together and a horse",
+      gt: [[60, 50, 150, 300], [95, 60, 185, 300], [270, 140, 470, 300]], gl: [0, 0, 1],
+      b: [[62, 48, 152, 298], [55, 62, 143, 306], [70, 40, 166, 290], [48, 76, 138, 312],
+        [93, 58, 185, 302], [98, 66, 190, 296], [85, 76, 175, 314],
+        [272, 138, 468, 302], [262, 150, 455, 305], [286, 130, 482, 296], [305, 165, 440, 302], [398, 28, 452, 96]],
+      s: [0.93, 0.81, 0.62, 0.47, 0.88, 0.70, 0.52, 0.90, 0.76, 0.58, 0.41, 0.34],
+      c: [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0],
+    },
+    crowd: (() => {   // the notebook's crowd figure (section 7), scaled x2 and shifted: IoU is scale invariant
+      const t = (q) => [2 * q[0] + 110, 2 * q[1] + 10, 2 * q[2] + 110, 2 * q[3] + 10];
+      return { title: "crowd: the notebook's two overlapping people (x2)",
+        gt: [[30, 20, 90, 150], [44, 22, 104, 152]].map(t), gl: [0, 0],
+        b: [[31, 22, 89, 150], [33, 17, 94, 151], [45, 23, 105, 153], [40, 24, 101, 152]].map(t), s: [0.95, 0.80, 0.90, 0.70], c: [0, 0, 0, 0] };
+    })(),
+    "person + horse": {
+      title: "a person standing in front of a horse",
+      gt: [[150, 60, 350, 300], [140, 120, 400, 300]], gl: [0, 1],
+      b: [[152, 58, 348, 302], [160, 70, 345, 305], [140, 52, 340, 296], [138, 122, 402, 298], [150, 115, 395, 305], [130, 128, 390, 302]],
+      s: [0.92, 0.66, 0.55, 0.85, 0.61, 0.48], c: [0, 0, 0, 1, 1, 1],
+    },
+  };
+  function randomScene(seed) {
+    const rnd = Lab.rng(seed * 7919 + 13), R = (a, b) => a + (b - a) * rnd(), gauss = () => { let u = 0; for (let i = 0; i < 6; i++) u += rnd(); return u - 3; };
+    const nObj = 2 + Math.floor(rnd() * 2), gt = [], gl = [], b = [], s = [], c = [];
+    for (let k = 0; k < nObj; k++) {
+      const cls = rnd() < 0.6 ? 0 : 1;
+      const w = cls === 0 ? R(60, 100) : R(150, 230), h = cls === 0 ? R(160, 250) : R(110, 170);
+      let x1 = k > 0 && rnd() < 0.55 ? gt[k - 1][0] + R(0.25, 0.75) * (gt[k - 1][2] - gt[k - 1][0]) - w * 0.3 : R(10, W - 10 - w);
+      x1 = Lab.clamp(x1, 6, W - 6 - w);
+      const y2 = H - R(14, 40);
+      gt.push([x1, y2 - h, x1 + w, y2].map(Math.round)); gl.push(cls);
+    }
+    gt.forEach((g, k) => {
+      const w = g[2] - g[0], h = g[3] - g[1], n = 3 + Math.floor(rnd() * 3), best = R(0.75, 0.97);
+      for (let j = 0; j < n; j++) {
+        const sd = j === 0 ? 0.025 : R(0.06, 0.14);
+        const q = [g[0] + gauss() * sd * w, g[1] + gauss() * sd * h, g[2] + gauss() * sd * w, g[3] + gauss() * sd * h];
+        const bx = [Lab.clamp(q[0], 0, W - 8), Lab.clamp(q[1], 0, H - 8), 0, 0];
+        bx[2] = Lab.clamp(q[2], bx[0] + 8, W); bx[3] = Lab.clamp(q[3], bx[1] + 8, H);
+        b.push(bx.map(Math.round)); s.push(Math.round((j === 0 ? best : best * R(0.45, 0.95)) * 100) / 100); c.push(gl[k]);
+      }
+    });
+    if (rnd() < 0.7) { const x = R(10, W - 80), y = R(10, 120); b.push([x, y, x + R(40, 70), y + R(50, 90)].map(Math.round)); s.push(Math.round(R(0.2, 0.45) * 100) / 100); c.push(rnd() < 0.5 ? 0 : 1); }
+    return { title: `random scene (seed ${seed})`, gt, gl, b, s, c };
+  }
+  let scene = null;
+  function loadScene() {
+    const src = S.scene === "random" ? randomScene(S.seed) : SCENES[S.scene] || SCENES.street;
+    scene = { title: src.title, gt: src.gt.map((x) => x.slice()), gl: src.gl.slice(), b: src.b.map((x) => x.slice()), s: src.s.slice(), c: src.c.slice() };
+  }
+  loadScene();
+
+  // ---- maths: identical to cvcourse.boxes.box_iou / nms / batched_nms / soft_nms (+ linear Soft-NMS)
+  function iou(a, b) {
+    const iw = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0])), ih = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+    const inter = iw * ih, union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter;
+    return union > 0 ? inter / Math.max(union, 1e-12) : 0;
+  }
+  /** The whole run as a list of events, one per pick: {pick, score, affected: [{j, iou, before, after, removed}]} */
+  function trace() {
+    const n = scene.b.length, cur = scene.s.slice(), soft = S.mode !== "greedy";
+    const below = [];
+    let alive = [];
+    for (let i = 0; i < n; i++) (scene.s[i] > S.score ? alive : below).push(i);
+    const same = (i, j) => !S.classwise || scene.c[i] === scene.c[j];
+    const events = [];
+    if (!soft) {
+      alive.sort((i, j) => scene.s[j] - scene.s[i] || i - j);
+      while (alive.length) {
+        const m = alive.shift(), affected = [];
+        alive = alive.filter((j) => {
+          if (!same(m, j)) return true;
+          const u = iou(scene.b[m], scene.b[j]);
+          if (u >= S.iou) { affected.push({ j, iou: u, before: cur[j], after: cur[j], removed: true }); return false; }
+          return true;
+        });
+        events.push({ pick: m, score: cur[m], affected });
+      }
+    } else {
+      while (alive.length) {
+        let m = alive[0]; for (const j of alive) if (cur[j] > cur[m]) m = j;      // np.argmax: first maximum in index order
+        alive = alive.filter((j) => j !== m);
+        const affected = [];
+        for (const j of alive) {
+          if (!same(m, j)) continue;
+          const u = iou(scene.b[m], scene.b[j]);
+          const f = S.mode === "gauss" ? Math.exp(-(u * u) / S.sigma) : u >= S.iou ? 1 - u : 1;
+          if (f < 1) { const before = cur[j]; cur[j] *= f; affected.push({ j, iou: u, before, after: cur[j], removed: cur[j] <= S.score }); }
+        }
+        alive = alive.filter((j) => cur[j] > S.score);
+        events.push({ pick: m, score: cur[m], affected });
+      }
+    }
+    return { events, below };
+  }
+  /** State of every box after k events. */
+  function stateAt(tr, k) {
+    const n = scene.b.length, st = Array.from({ length: n }, (_, i) => ({ status: "wait", now: scene.s[i] }));
+    for (const i of tr.below) st[i].status = "below";
+    tr.events.slice(0, k).forEach((e, t) => {
+      st[e.pick].status = "kept"; st[e.pick].step = t + 1; st[e.pick].now = e.score;
+      for (const a of e.affected) { st[a.j].now = a.after; if (a.removed) { st[a.j].status = "removed"; st[a.j].by = e.pick; st[a.j].iou = a.iou; st[a.j].step = t + 1; } }
+    });
+    return st;
+  }
+  function evaluate(st) {             // greedy matching of kept boxes (by score) to same-class GT at IoU >= 0.5
+    const kept = st.map((x, i) => [x, i]).filter(([x]) => x.status === "kept").sort((a, b) => b[0].now - a[0].now || a[1] - b[1]).map(([, i]) => i);
+    const used = scene.gt.map(() => false);
+    let fp = 0;
+    for (const i of kept) {
+      let best = -1, bj = -1;
+      scene.gt.forEach((g, j) => { if (!used[j] && scene.gl[j] === scene.c[i]) { const u = iou(scene.b[i], g); if (u > best) { best = u; bj = j; } } });
+      if (best >= 0.5) used[bj] = true; else fp++;
+    }
+    return { kept: kept.length, found: used.filter(Boolean).length, fp };
+  }
+
+  // ---- controls
+  const sceneOpts = [...Object.keys(SCENES), "random"].map((v) => ({ value: v, label: v === "random" ? "random (seeded)" : v }));
+  const sceneSel = Lab.select("#ctl1", { label: "scene", options: sceneOpts, value: SCENES[S.scene] || S.scene === "random" ? S.scene : "street",
+    onChange: (v) => { S.scene = v; loadScene(); S.step = -1; redraw(); } });
+  const rndRow = Lab.el("div", { class: "btn-row", style: "align-self:flex-end" }); Lab.$("#ctl1").append(rndRow);
+  Lab.button(rndRow, "new random scene", () => { S.seed = S.scene === "random" ? S.seed + 1 : S.seed; S.scene = "random"; sceneSel.set("random"); loadScene(); S.step = -1; redraw(); });
+  const modeSeg = Lab.segmented("#ctl1", { label: "algorithm", options: [{ value: "greedy", label: "greedy NMS" }, { value: "linear", label: "Soft-NMS linear" }, { value: "gauss", label: "Soft-NMS Gaussian" }],
+    value: ["greedy", "linear", "gauss"].includes(S.mode) ? S.mode : "greedy", onChange: (v) => { S.mode = v; paintSliders(); changed(); } });
+  if (!["greedy", "linear", "gauss"].includes(S.mode)) S.mode = "greedy";
+  Lab.segmented("#ctl1", { label: "classes", options: [{ value: false, label: "class-agnostic" }, { value: true, label: "class-wise" }],
+    value: S.classwise, onChange: (v) => { S.classwise = v; changed(); } });
+  const iouSl = Lab.slider("#ctl2", { label: "IoU threshold", min: 0.1, max: 0.9, step: 0.05, value: S.iou, fmt: (v) => v.toFixed(2), onInput: (v) => { S.iou = v; changed(); } });
+  Lab.slider("#ctl2", { label: "score threshold (drop ≤)", min: 0, max: 0.9, step: 0.05, value: S.score, fmt: (v) => v.toFixed(2), onInput: (v) => { S.score = v; changed(); } });
+  const sigSl = Lab.slider("#ctl2", { label: "σ (Gaussian Soft-NMS)", min: 0.1, max: 1.5, step: 0.05, value: S.sigma, fmt: (v) => v.toFixed(2), onInput: (v) => { S.sigma = v; changed(); } });
+  function paintSliders() {      // grey out the slider the current algorithm does not use
+    iouSl.el.style.opacity = S.mode === "gauss" ? 0.4 : 1; sigSl.el.style.opacity = S.mode === "gauss" ? 1 : 0.4;
+  }
+  paintSliders();
+  const btns = Lab.el("div", { class: "btn-row", style: "align-self:flex-end" });
+  Lab.$("#ctl2").append(btns);
+  let nEvents = 0;
+  const changed = () => { if (S.step >= nEvents) S.step = -1; redraw(); };   // an edit after the last step shows the new complete run
+  Lab.button(btns, "step ▸", () => { S.step = S.step < 0 || S.step >= nEvents ? 1 : S.step + 1; redraw(); }, "primary");
+  Lab.button(btns, "run all", () => { S.step = -1; redraw(); });
+  Lab.button(btns, "restart", () => { S.step = 0; redraw(); });
+  const R = { kept: Lab.readout("#readouts", "kept"), found: Lab.readout("#readouts", "objects found"), fp: Lab.readout("#readouts", "false positives"), step: Lab.readout("#readouts", "step") };
+
+  // ---- canvas + pointer: drag a candidate (the one whose edge is nearest to the pointer)
+  const cv = Lab.canvas("#fig", W, H, { framed: true });
+  let hover = null, drag = null;
+  function pick(p) {
+    let best = null, bd = 1e9;
+    scene.b.forEach((b, i) => {
+      if (p.x < b[0] - 6 || p.x > b[2] + 6 || p.y < b[1] - 6 || p.y > b[3] + 6) return;
+      const d = Math.min(Math.abs(p.x - b[0]), Math.abs(p.x - b[2]), Math.abs(p.y - b[1]), Math.abs(p.y - b[3]));
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+  }
+  Lab.pointer(cv, {
+    down(p) { const i = pick(p); if (i !== null) { drag = { i, start: p, orig: scene.b[i].slice() }; hover = i; redraw(); } },
+    move(p) {
+      if (!drag) return;
+      const o = drag.orig, dx = Lab.clamp(Math.round(p.x - drag.start.x), -o[0], W - o[2]), dy = Lab.clamp(Math.round(p.y - drag.start.y), -o[1], H - o[3]);
+      scene.b[drag.i] = [o[0] + dx, o[1] + dy, o[2] + dx, o[3] + dy]; changed();
+    },
+    up() { drag = null; },
+    hover(p) { const i = pick(p); cv.canvas.style.cursor = i === null ? "default" : "move"; if (i !== hover) { hover = i; redraw(); } },
+    leave() { if (hover !== null) { hover = null; redraw(); } },
+  });
+
+  // ---- drawing
+  function person(ctx, b) {
+    const w = b[2] - b[0], h = b[3] - b[1], cx = (b[0] + b[2]) / 2, r = Math.min(w * 0.2, h * 0.085);
+    ctx.beginPath(); ctx.arc(cx, b[1] + r + 3, r, 0, 2 * Math.PI); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(cx - 0.3 * w, b[1] + 2 * r + 8, 0.6 * w, 0.42 * h, 8); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(cx - 0.25 * w, b[1] + 2 * r + 8 + 0.4 * h, 0.21 * w, b[3] - (b[1] + 2 * r + 8 + 0.4 * h) - 2, 5); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(cx + 0.04 * w, b[1] + 2 * r + 8 + 0.4 * h, 0.21 * w, b[3] - (b[1] + 2 * r + 8 + 0.4 * h) - 2, 5); ctx.fill();
+  }
+  function horse(ctx, b) {
+    const w = b[2] - b[0], h = b[3] - b[1], X = (t) => b[0] + t * w, Y = (t) => b[1] + t * h;
+    ctx.beginPath(); ctx.ellipse(X(0.45), Y(0.42), 0.33 * w, 0.17 * h, 0, 0, 2 * Math.PI); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(X(0.66), Y(0.3)); ctx.lineTo(X(0.8), Y(0.06)); ctx.lineTo(X(0.9), Y(0.1)); ctx.lineTo(X(0.78), Y(0.45)); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(X(0.9), Y(0.13), 0.08 * w, 0.06 * h, 0.5, 0, 2 * Math.PI); ctx.fill();
+    for (const t of [0.17, 0.27, 0.6, 0.7]) { ctx.beginPath(); ctx.roundRect(X(t), Y(0.5), 0.05 * w, h * 0.5 - 2, 3); ctx.fill(); }
+    ctx.beginPath(); ctx.moveTo(X(0.13), Y(0.34)); ctx.lineTo(X(0.02), Y(0.62)); ctx.lineTo(X(0.08), Y(0.62)); ctx.lineTo(X(0.16), Y(0.42)); ctx.closePath(); ctx.fill();
+  }
+  const placed = [];
+  function label(ctx, text, x, y, bg, fg = "#fff") {      // chip with simple collision avoidance
+    ctx.save(); ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", sans-serif';
+    const tw = ctx.measureText(text).width + 8, th = 15;
+    const lx = Lab.clamp(x, 0, W - tw), y0 = Lab.clamp(y, 0, H - th);
+    const free = (yy) => !placed.some((q) => lx < q[0] + q[2] && lx + tw > q[0] && yy < q[1] + q[3] && yy + th > q[1]);
+    let ly = y0;                                      // stack colliding labels upwards, then downwards, near their box
+    for (const d of [0, -1, -2, -3, -4, 1, 2, -5, -6, 3, -7, -8]) {
+      const yy = Lab.clamp(y0 + d * (th + 1), 0, H - th);
+      if (free(yy)) { ly = yy; break; }
+    }
+    placed.push([lx, ly, tw, th]);
+    ctx.fillStyle = bg; ctx.fillRect(lx, ly, tw, th);
+    ctx.fillStyle = fg; ctx.textBaseline = "middle"; ctx.fillText(text, lx + 4, ly + th / 2 + 0.5); ctx.restore();
+  }
+  function stroke(ctx, b, color, width, dash, alpha = 1) {
+    ctx.save(); ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash);
+    ctx.strokeRect(b[0] + 0.5, b[1] + 0.5, b[2] - b[0] - 1, b[3] - b[1] - 1); ctx.restore();
+  }
+  const f2 = (v) => v.toFixed(2);
+
+  function draw() {
+    const tr = trace(); nEvents = tr.events.length;
+    if (S.step > nEvents) S.step = -1;
+    const k = S.step < 0 ? nEvents : S.step, done = k >= nEvents;
+    const st = stateAt(tr, k), ev = k > 0 && !done || (done && S.step > 0) ? tr.events[k - 1] : null;
+    const ctx = cv.ctx; cv.clear(); placed.length = 0;
+    const cls = (i) => Lab.color(CLASSES[scene.c[i]].color), hl = Lab.color("--hl"), bad = Lab.color("--bad"), muted = Lab.color("--muted");
+    // ground and objects
+    ctx.save(); ctx.strokeStyle = Lab.color("--grid"); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, H - 12); ctx.lineTo(W, H - 12); ctx.stroke(); ctx.restore();
+    ctx.save(); ctx.fillStyle = Lab.alpha("--c3", 0.22);
+    scene.gt.forEach((g, j) => (scene.gl[j] === 0 ? person : horse)(ctx, g)); ctx.restore();
+    scene.gt.forEach((g) => stroke(ctx, g, Lab.color("--c3"), 1.2, [2, 3], 0.9));
+    const letterX = [];                                   // object letters under the ground line, never on top of each other
+    scene.gt.forEach((g, j) => {
+      let x = (g[0] + g[2]) / 2;
+      while (letterX.some((q) => Math.abs(q - x) < 13)) x += 13;
+      letterX.push(x);
+      Lab.text(ctx, String.fromCharCode(65 + j), x, H - 1, { size: 11, weight: 700, align: "center", color: Lab.color("--c3") });
+    });
+    // candidates, least important first
+    const order = scene.b.map((_, i) => i);
+    const rank = (i) => ({ below: 0, removed: 1, wait: 2, kept: 3 }[st[i].status]);
+    order.sort((a, b) => rank(a) - rank(b) || scene.s[a] - scene.s[b]);
+    const affected = new Map(ev ? ev.affected.map((a) => [a.j, a]) : []);
+    for (const i of order) {
+      const b = scene.b[i], s = st[i];
+      if (ev && (i === ev.pick || affected.has(i))) continue;
+      if (s.status === "below") stroke(ctx, b, muted, 1, [2, 3], 0.8);
+      else if (s.status === "removed") {
+        stroke(ctx, b, cls(i), 1.3, [5, 4], 0.45);
+        Lab.text(ctx, "✕", b[2] - 4, b[1] + 13, { size: 12, weight: 700, color: bad, align: "right" });
+      } else if (s.status === "wait") stroke(ctx, b, cls(i), 1.6, [], 0.85);
+      else stroke(ctx, b, cls(i), 3, []);
+    }
+    // the current step: the kept box and what it did to the others
+    if (ev) {
+      for (const a of ev.affected) {
+        const b = scene.b[a.j];
+        stroke(ctx, b, a.removed ? bad : hl, 2, [6, 3]);
+      }
+      stroke(ctx, scene.b[ev.pick], hl, 3.5, []);
+    }
+    // labels: kept boxes, then the current step's numbers, then the hovered box
+    for (const i of order) if (st[i].status === "kept" && !(ev && i === ev.pick)) label(ctx, `#${i + 1} ${f2(st[i].now)}`, scene.b[i][0] - 1, scene.b[i][1] - 15, cls(i));
+    if (ev) {
+      label(ctx, `keep #${ev.pick + 1} ${f2(ev.score)}`, scene.b[ev.pick][0] - 1, scene.b[ev.pick][1] - 15, hl);
+      for (const a of ev.affected) {
+        const b = scene.b[a.j];
+        const t = S.mode === "greedy" ? `#${a.j + 1} IoU ${f2(a.iou)} ✕` : `#${a.j + 1} IoU ${f2(a.iou)}: ${f2(a.before)}→${f2(a.after)}${a.removed ? " ✕" : ""}`;
+        label(ctx, t, b[0] + 2, b[3] - 18, a.removed ? bad : Lab.color("--surface"), a.removed ? "#fff" : Lab.color("--ink"));
+      }
+    }
+    if (hover !== null && scene.b[hover]) {
+      stroke(ctx, scene.b[hover], hl, 2, []);
+      label(ctx, `#${hover + 1} ${CLASSES[scene.c[hover]].name} ${f2(scene.s[hover])}`, scene.b[hover][2] - 60, scene.b[hover][1] + 3, Lab.color("--ink"), Lab.color("--surface"));
+    }
+
+    // readouts
+    const ev2 = evaluate(st);
+    R.kept.set(String(st.filter((x) => x.status === "kept").length));
+    R.found.set(done ? `${ev2.found} / ${scene.gt.length}` : "…", done ? (ev2.found === scene.gt.length ? "good" : "bad") : "");
+    R.fp.set(done ? String(ev2.fp) : "…", done ? (ev2.fp === 0 ? "good" : "bad") : "");
+    R.step.set(done ? `done (${nEvents})` : `${k} / ${nEvents}`);
+    Lab.$("#cap").innerHTML = `${scene.title} <small>${scene.b.length} candidates, drag any box</small>`;
+
+    // narration
+    const alg = S.mode === "greedy" ? "greedy NMS" : S.mode === "linear" ? "linear Soft-NMS" : "Gaussian Soft-NMS";
+    const cw = S.classwise ? " of the same class" : "";
+    const nb = tr.below.length;
+    let story;
+    if (k === 0) story = `<b>Start.</b> ${scene.b.length - nb} boxes have a score above ${f2(S.score)}${nb ? ` (${nb} below it are dropped first)` : ""}. ` +
+      `Press <b>step</b>: ${alg} repeatedly keeps the highest-scoring remaining box.`;
+    else if (ev) {
+      const list = (arr) => arr.slice(0, 5).join(", ") + (arr.length > 5 ? ", …" : "");
+      story = `<b>Step ${k}:</b> #${ev.pick + 1} (${CLASSES[scene.c[ev.pick]].name}) has the highest ${S.mode === "greedy" ? "" : "current "}score of the remaining boxes, ${f2(ev.score)} → <b>keep it</b>. `;
+      if (S.mode === "greedy") story += ev.affected.length ? `Remove every remaining box${cw} with IoU ≥ ${f2(S.iou)} to it: ${list(ev.affected.map((a) => `#${a.j + 1} (IoU ${f2(a.iou)})`))}.` : `No remaining box${cw} overlaps it with IoU ≥ ${f2(S.iou)}.`;
+      else {
+        const rule = S.mode === "gauss" ? `× exp(−IoU²/${f2(S.sigma)})` : `× (1 − IoU) where IoU ≥ ${f2(S.iou)}`;
+        story += ev.affected.length ? `Decay the overlapping boxes${cw} ${rule}: ${list(ev.affected.map((a) => `#${a.j + 1} ${f2(a.before)}→${f2(a.after)}`))}.` : `No other box${cw} is decayed.`;
+        const gone = ev.affected.filter((a) => a.removed);
+        if (gone.length) story += ` Now ≤ ${f2(S.score)}, removed: ${gone.map((a) => `#${a.j + 1}`).join(", ")}.`;
+      }
+      if (done) story += ` <b>Done:</b> found ${ev2.found} of ${scene.gt.length} objects, ${ev2.fp} false positive${ev2.fp === 1 ? "" : "s"}.`;
+    } else {
+      const rem = st.filter((x) => x.status === "removed").length;
+      story = `<b>Done</b> in ${nEvents} step${nEvents === 1 ? "" : "s"}: kept ${ev2.kept} of ${scene.b.length} boxes; ${rem} ${S.mode === "greedy" ? `removed as duplicates (IoU ≥ ${f2(S.iou)} with a kept box${cw})` : `decayed to ≤ ${f2(S.score)}`}` +
+        `${nb ? `, ${nb} below the score threshold from the start` : ""}. Found ${ev2.found} of ${scene.gt.length} objects with ${ev2.fp} false positive${ev2.fp === 1 ? "" : "s"}.`;
+    }
+    Lab.$("#story").innerHTML = story;
+
+    // table, sorted by the original score
+    const soft = S.mode !== "greedy";
+    const rows = scene.b.map((_, i) => i).sort((a, b) => scene.s[b] - scene.s[a] || a - b);
+    const statusText = (i) => {
+      const s = st[i];
+      if (s.status === "below") return `below score thr`;
+      if (s.status === "wait") return "waiting";
+      if (s.status === "kept") return `kept (step ${s.step})`;
+      return soft ? `decayed by #${s.by + 1} to ≤ ${f2(S.score)}` : `removed by #${s.by + 1}, IoU ${f2(s.iou)}`;
+    };
+    Lab.$("#table").innerHTML = `<tr><th>#</th><th>class</th><th class="n">score</th>${soft ? `<th class="n">now</th>` : ""}<th>status</th></tr>` +
+      rows.map((i) => `<tr data-i="${i}" class="${i === hover ? "hover" : ""} ${ev && (i === ev.pick || affected.has(i)) ? "cur" : ""}"><td>#${i + 1}</td>` +
+        `<td><i class="sw" style="background:${cls(i)}"></i>${CLASSES[scene.c[i]].name}</td><td class="n">${f2(scene.s[i])}</td>` +
+        (soft ? `<td class="n">${f2(st[i].now)}</td>` : "") + `<td class="${st[i].status}">${statusText(i)}</td></tr>`).join("");
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${Lab.alpha("--c3", 0.5)}"></i>real object (dashed: its GT box)</span>` +
+      CLASSES.map((c) => `<span><i style="background:${Lab.color(c.color)}"></i>${c.name} box</span>`).join("") +
+      `<span>thick = kept, dashed + ✕ = removed, grey dotted = below score thr</span><span><i style="background:${hl}"></i>current step</span>`;
+
+    // Python export (the same input for cvcourse.boxes)
+    const keptIds = st.map((x, i) => [x, i]).filter(([x]) => x.status === "kept").map(([, i]) => i + 1).sort((a, b) => a - b);
+    let call;
+    if (S.mode === "greedy") call = S.classwise ? `keep = ids[boxes.batched_nms(b[k], s[k], cls[k], ${f2(S.iou)})]` : `keep = ids[boxes.nms(b[k], s[k], ${f2(S.iou)})]`;
+    else if (S.mode === "gauss") call = S.classwise ? `keep = np.concatenate([ids[cls[k] == c][boxes.soft_nms(b[k][cls[k] == c],\n    s[k][cls[k] == c], ${f2(S.sigma)}, ${f2(S.score)})[0]] for c in (0, 1)])` : `keep = ids[boxes.soft_nms(b[k], s[k], sigma=${f2(S.sigma)}, score_threshold=${f2(S.score)})[0]]`;
+    else call = "# linear Soft-NMS is not in cvcourse.boxes (Exercise 7 writes the Gaussian one)";
+    Lab.$("#py").textContent =
+      `b = np.array([${scene.b.map((x) => `[${x.join(", ")}]`).join(",\n              ")}], float)\n` +
+      `s = np.array([${scene.s.map(f2).join(", ")}])\ncls = np.array([${scene.c.join(", ")}])   # 0 person, 1 horse\n` +
+      `k = s > ${f2(S.score)}; ids = np.where(k)[0]   # score threshold first\n${call}\n` +
+      `sorted(keep + 1)   # boxes are #1.. here -> ${done ? `[${keptIds.join(", ")}]` : "(finish the run)"}`;
+  }
+  const redraw = Lab.loop(draw);
+  Lab.$("#table").addEventListener("pointerover", (e) => { const tr = e.target.closest("tr[data-i]"); const i = tr ? Number(tr.dataset.i) : null; if (i !== hover) { hover = i; redraw(); } });
+  Lab.$("#table").addEventListener("pointerleave", () => { hover = null; redraw(); });
+})();
+</script>
+</body>
+</html>

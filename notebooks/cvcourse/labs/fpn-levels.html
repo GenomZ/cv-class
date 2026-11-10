@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FPN levels</title>
+<meta name="lab-notebook" content="D2-03">
+<meta name="lab-summary" content="Resize one object and see which pyramid level P2-P7 gets it under the FPN RoI rule, RetinaNet anchor matching and FCOS ranges; plus the top-down pathway with live tensor shapes.">
+<meta name="lab-height" content="920">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .figrow { display: grid; grid-template-columns: minmax(0, 360fr) minmax(0, 330fr); gap: 16px; align-items: start; }
+  .figrow canvas.lab-canvas, #fig-strip canvas.lab-canvas, #fig-path canvas.lab-canvas { width: 100%; }
+  .assign { border-collapse: separate; border-spacing: 0 3px; font-size: 12.5px; width: 100%; }
+  .assign td { padding: 5px 8px; background: var(--wash); vertical-align: top; }
+  .assign td:first-child { border-radius: 6px 0 0 6px; font-weight: 650; white-space: nowrap; }
+  .assign td:last-child { border-radius: 0 6px 6px 0; color: var(--ink-2); }
+  .assign b { color: var(--ink); }
+  .hide { display: none !important; }
+  .presets { display: flex; gap: 5px; flex-wrap: wrap; }
+  #fig-strip { margin-top: 12px; }
+  #formula { font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>FPN levels</h1><span class="lab-tag">D2-03 · sections 3-4, 6</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A feature pyramid offers the same image at strides 4 to 128. Each detector decides by object size which level
+    is responsible. Drag or resize the box (corner handle) and compare three rules; click a level below to draw its grid
+    on the image. The second view shows how the top-down pathway builds the levels.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div id="v-levels">
+        <div class="figrow">
+          <figure class="lab-fig"><figcaption id="cap-img">input image</figcaption><div id="fig-img"></div></figure>
+          <div>
+            <p class="lab-cap">which level is responsible? <small>(one object, three rules)</small></p>
+            <table class="assign" id="assign"></table>
+            <div class="formula" id="formula" style="margin-top:8px"></div>
+          </div>
+        </div>
+        <figure class="lab-fig" id="fig-strip"><figcaption id="cap-strip">the same window around the object on every level</figcaption></figure>
+      </div>
+      <div id="v-path" class="hide">
+        <figure class="lab-fig"><figcaption id="cap-path">top-down pathway</figcaption><div id="fig-path"></div></figure>
+        <div class="formula" id="formula2" style="margin-top:8px"></div>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-view"></div>
+      <div id="c-size"></div>
+      <div id="c-lev" class="lab-controls">
+        <div class="ctl"><span class="ctl-label">object size (keeps the centre)</span><div class="presets" id="presets"></div></div>
+        <div id="c-focus"></div>
+        <div id="c-cs"></div>
+      </div>
+      <div id="c-path" class="lab-controls hide"></div>
+      <div class="readouts" id="readouts"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Set the object to <b>16 px</b> and look at P5 (stride 32, the output stride of a plain ResNet). What fraction of one cell does it fill?
+        <details><summary>why</summary><p>0.5 x 0.5 cells: a quarter of one cell, whose feature vector also describes 75% background. A
+          single stride-32 grid (YOLOv1, the original DETR) has almost no signal for such objects. On P3 the same object covers
+          2 x 2 cells, and the FPN gives those cells the semantics of C5 through the top-down pathway.</p></details></li>
+      <li>Predict the level for a 224 x 224 object under the RoI rule, then grow the object from 16 px to 512 px with the presets.
+        Do the three rules agree?
+        <details><summary>why</summary><p>The RoI rule sends a 224 px box to P4 by construction (k<sub>0</sub> = 4 for the ImageNet
+          size) and moves up one level per doubling. RetinaNet follows its anchor sizes (32 on P3 ... 512 on P7) and FCOS its
+          distance ranges; near the boundaries they disagree by one level, and RetinaNet can make several levels positive at once.</p></details></li>
+      <li>Make the box long and thin (e.g. 200 x 40 px). What happens to the best anchor IoU, and to FCOS?
+        <details><summary>why</summary><p>RetinaNet's anchors only have aspect ratios 1:2, 1:1, 2:1, so the best IoU drops; when no anchor
+          reaches 0.5, the matcher still forces the single best anchor to be positive (low-quality match), a weak target. FCOS does
+          not care about the shape: it only compares max(l, t, r, b) with the level's range.</p></details></li>
+      <li>With a 100 x 100 px object, count the FCOS points per level with and without centre sampling.
+        <details><summary>why</summary><p>The centre point has max(l, t, r, b) = 50, inside P3's range (0, 64), but points away from the
+          centre have larger distances and fall into P4's range (64, 128): one object, two levels. Without centre sampling most of
+          P4's points inside the box become positive; centre sampling (radius 1.5 strides, torchvision's default) keeps only the
+          ones near the centre, so the coarser level gets a few positives instead of dozens.</p></details></li>
+      <li>Switch to the <b>top-down pathway</b>. Predict the shape of P3 for a 640 px input and d = 128, and where most FPN
+        parameters sit. Then switch the backbone to ResNet-50.
+        <details><summary>answer</summary><p>(1, 128, 80, 80). With ResNet-18 the three 3 x 3 smoothing convs hold most parameters
+          (9 d<sup>2</sup> each); with ResNet-50 only the 1 x 1 laterals grow (they read 512 / 1024 / 2048 channels), and at d = 128 they
+          now outweigh the smoothing convs. The input size changes every shape and no parameter count: the same FPN runs on any image size.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(async () => {
+  const S = Lab.params({ view: "levels", size: 512, cx: 200, cy: 190, w: 40, h: 32, focus: 5, cs: true, backbone: "r18", d: 256 });
+  if (![256, 384, 512, 640].includes(S.size)) S.size = 512;
+  S.view = S.view === "pathway" ? "pathway" : "levels";
+  S.focus = Lab.clamp(Math.round(S.focus), 2, 7);
+  if (![64, 128, 256].includes(S.d)) S.d = 256;
+  S.backbone = S.backbone === "r50" ? "r50" : "r18";
+  const LEVELS = [2, 3, 4, 5, 6, 7];
+  const RATIOS = [0.5, 1, 2];                                        // h / w, as boxes.make_anchors
+  const SCALES = [1, 2 ** (1 / 3), 2 ** (2 / 3)];
+  const clampObj = () => {
+    S.w = Lab.clamp(Math.round(S.w), 4, S.size); S.h = Lab.clamp(Math.round(S.h), 4, S.size);
+    S.cx = Lab.clamp(S.cx, S.w / 2, S.size - S.w / 2); S.cy = Lab.clamp(S.cy, S.h / 2, S.size - S.h / 2);
+  };
+  clampObj();
+  const box = () => [S.cx - S.w / 2, S.cy - S.h / 2, S.cx + S.w / 2, S.cy + S.h / 2];
+
+  // ---- the three rules
+  const areaB = (b) => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
+  function iou(a, b) {
+    const iw = Math.min(a[2], b[2]) - Math.max(a[0], b[0]), ih = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+    if (iw <= 0 || ih <= 0) return 0;
+    const inter = iw * ih; return inter / (areaB(a) + areaB(b) - inter);
+  }
+  function roiLevel(b) {                                             // torchvision.ops.poolers.LevelMapper, P2-P5
+    const s = Math.sqrt(areaB(b)), raw = 4 + Math.log2(s / 224);
+    return { s, raw, k: Lab.clamp(Math.floor(raw + 1e-6), 2, 5) };
+  }
+  function retina(b) {                                               // anchors 32 * 2^(L-3) * {1, 2^1/3, 2^2/3} x ratios {1:2, 1:1, 2:1}
+    const out = {};
+    let gBest = { iou: -1 };
+    for (const L of LEVELS.slice(1)) {
+      const st = 2 ** L, n = S.size / st, base = 32 * 2 ** (L - 3);
+      let pos = 0, best = { iou: -1 };
+      const anchors = [];
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        const cx = (j + 0.5) * st, cy = (i + 0.5) * st;
+        for (const sc of SCALES) for (const r of RATIOS) {
+          const w = base * sc / Math.sqrt(r), h = base * sc * Math.sqrt(r);
+          const a = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], v = iou(a, b);
+          if (v >= 0.5) { pos++; anchors.push(a); }
+          if (v > best.iou) best = { iou: v, a, L };
+        }
+      }
+      out[L] = { pos, best, anchors, total: n * n * 9 };
+      if (best.iou > gBest.iou) gBest = best;
+    }
+    const anyPos = LEVELS.slice(1).some((L) => out[L].pos > 0);
+    return { lv: out, forced: anyPos ? null : gBest };               // low-quality match: the best anchor becomes positive
+  }
+  function fcos(b) {                                                 // torchvision FCOS matching, points at cell centres
+    const out = {}, gcx = (b[0] + b[2]) / 2, gcy = (b[1] + b[3]) / 2;
+    for (const L of LEVELS.slice(1)) {
+      const st = 2 ** L, n = S.size / st, lo = L === 3 ? 0 : 4 * st, hi = L === 7 ? Infinity : 8 * st;
+      const pts = [];
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        const x = (j + 0.5) * st, y = (i + 0.5) * st;
+        const l = x - b[0], t = y - b[1], r = b[2] - x, bb = b[3] - y;
+        if (Math.min(l, t, r, bb) <= 0) continue;
+        if (S.cs && Math.max(Math.abs(x - gcx), Math.abs(y - gcy)) >= 1.5 * st) continue;
+        const m = Math.max(l, t, r, bb);
+        if (m > lo && m < hi) pts.push([x, y]);
+      }
+      out[L] = { pts, lo, hi };
+    }
+    return out;
+  }
+
+  // ---- controls
+  Lab.segmented("#c-view", { label: "view", options: [{ value: "levels", label: "levels" }, { value: "pathway", label: "top-down pathway" }], value: S.view,
+    onChange: (v) => { S.view = v; layout(); redraw(); } });
+  Lab.segmented("#c-size", { label: "input size (px)", options: [256, 384, 512, 640], value: S.size,
+    onChange: (v) => { const f = v / S.size; S.cx *= f; S.cy *= f; S.size = v; clampObj(); redraw(); } });
+  for (const px of [16, 32, 64, 128, 256, 512]) Lab.button("#presets", String(px), () => { S.w = S.h = px; clampObj(); redraw(); });
+  const focusCtl = Lab.segmented("#c-focus", { label: "grid drawn on the image", options: LEVELS.map((L) => ({ value: L, label: "P" + L })), value: S.focus,
+    onChange: (v) => { S.focus = v; redraw(); } });
+  Lab.toggle("#c-cs", { label: "FCOS centre sampling (1.5 strides)", value: S.cs, onChange: (v) => { S.cs = v; redraw(); } });
+  Lab.segmented("#c-path", { label: "backbone", options: [{ value: "r18", label: "ResNet-18" }, { value: "r50", label: "ResNet-50" }], value: S.backbone, onChange: (v) => { S.backbone = v; redraw(); } });
+  Lab.segmented("#c-path", { label: "FPN width d", options: [64, 128, 256], value: S.d, onChange: (v) => { S.d = v; redraw(); } });
+  const rds = [Lab.readout("#readouts", "x"), Lab.readout("#readouts", "x"), Lab.readout("#readouts", "x")];
+  const setRd = (k, label, v) => { rds[k].el.querySelector(".k").textContent = label; rds[k].set(v); };
+  function layout() {
+    const lev = S.view === "levels";
+    Lab.$("#v-levels").classList.toggle("hide", !lev); Lab.$("#c-lev").classList.toggle("hide", !lev);
+    Lab.$("#v-path").classList.toggle("hide", lev); Lab.$("#c-path").classList.toggle("hide", lev);
+  }
+  layout();
+
+  // ---- canvases
+  const photo = await Lab.photo();
+  const V = 360;
+  const cimg = Lab.canvas("#fig-img", V, V, { framed: true });
+  const cstrip = Lab.canvas("#fig-strip", 700, 214);
+  const cpath = Lab.canvas("#fig-path", 700, 400);
+  const SW = 104, SG = (700 - 6 * SW) / 5, SY = 20;
+  let drag = null;
+  Lab.pointer(cimg, {
+    down(p) {
+      const k = V / S.size, b = box().map((v) => v * k);
+      if (Math.abs(p.x - b[2]) <= 9 && Math.abs(p.y - b[3]) <= 9) drag = { mode: "resize", x1: b[0] / k, y1: b[1] / k };
+      else if (p.x >= b[0] - 4 && p.x <= b[2] + 4 && p.y >= b[1] - 4 && p.y <= b[3] + 4) drag = { mode: "move", dx: p.x / k - S.cx, dy: p.y / k - S.cy };
+    },
+    move(p) {
+      if (!drag) return;
+      const k = V / S.size, x = p.x / k, y = p.y / k;
+      if (drag.mode === "move") { S.cx = Math.round(x - drag.dx); S.cy = Math.round(y - drag.dy); }
+      else { S.w = Math.round(Math.max(4, x - drag.x1)); S.h = Math.round(Math.max(4, y - drag.y1)); S.cx = drag.x1 + S.w / 2; S.cy = drag.y1 + S.h / 2; }
+      clampObj(); redraw();
+    },
+    up() { drag = null; },
+    hover(p) {
+      const k = V / S.size, b = box().map((v) => v * k);
+      cimg.canvas.style.cursor = Math.abs(p.x - b[2]) <= 9 && Math.abs(p.y - b[3]) <= 9 ? "nwse-resize" : p.x >= b[0] && p.x <= b[2] && p.y >= b[1] && p.y <= b[3] ? "move" : "default";
+    },
+  });
+  Lab.pointer(cstrip, { down(p) { const k = Math.floor(p.x / (SW + SG)); if (k >= 0 && k < 6) { S.focus = LEVELS[k]; focusCtl.set(S.focus); redraw(); } } });
+
+  // ---- drawing helpers
+  const fmt = (n) => Math.round(n).toLocaleString("en-US").replace(/,/g, " ");
+  const shape = (c, n) => `(1, ${c}, ${n}, ${n})`;
+  function coverage(L, b) {                                          // fraction of each cell covered by the box
+    const st = 2 ** L, n = S.size / st, cov = new Float32Array(n * n);
+    const j0 = Math.max(0, Math.floor(b[0] / st)), j1 = Math.min(n - 1, Math.floor((b[2] - 1e-9) / st));
+    const i0 = Math.max(0, Math.floor(b[1] / st)), i1 = Math.min(n - 1, Math.floor((b[3] - 1e-9) / st));
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+      const ow = Math.min(b[2], (j + 1) * st) - Math.max(b[0], j * st), oh = Math.min(b[3], (i + 1) * st) - Math.max(b[1], i * st);
+      cov[i * n + j] = Math.max(0, ow) * Math.max(0, oh) / (st * st);
+    }
+    return { cov, n, st };
+  }
+
+  function drawLevels() {
+    const b = box(), R = roiLevel(b), RN = retina(b), FC = fcos(b);
+    const ink = Lab.color("--ink"), muted = Lab.color("--muted"), cGT = Lab.color("--c3"), cA = Lab.color("--c1"), cF = Lab.color("--c2");
+    const retL = LEVELS.slice(1).filter((L) => RN.lv[L].pos > 0), fcL = LEVELS.slice(1).filter((L) => FC[L].pts.length > 0);
+
+    // main image with the focus level
+    const g = cimg.ctx, k = V / S.size; cimg.clear();
+    Lab.image(g, photo.gray, photo.w, photo.h, 0, 0, V, V, (v) => Lab.grayRGB(0.25 + 0.5 * v));
+    g.fillStyle = Lab.alpha("--surface", 0.45); g.fillRect(0, 0, V, V);
+    const F = coverage(S.focus, b), cs = F.st * k;
+    g.save();
+    for (let i = 0; i < F.n; i++) for (let j = 0; j < F.n; j++) {
+      const c = F.cov[i * F.n + j]; if (!c) continue;
+      g.fillStyle = Lab.alpha("--c4", 0.25 + 0.45 * c); g.fillRect(j * cs, i * cs, cs, cs);
+    }
+    if (cs >= 3) {
+      g.strokeStyle = Lab.alpha("--ink", cs >= 8 ? 0.35 : 0.18); g.lineWidth = 1;
+      for (let t = 1; t < F.n; t++) { const v = Math.round(t * cs) + 0.5; g.beginPath(); g.moveTo(v, 0); g.lineTo(v, V); g.moveTo(0, v); g.lineTo(V, v); g.stroke(); }
+    }
+    if (S.focus >= 3) {
+      const r = RN.lv[S.focus];
+      for (const a of r.anchors.slice(0, 40)) Lab.box(g, a.map((v) => v * k), { color: Lab.alpha("--c1", 0.55), width: 1.2, dash: [3, 3] });
+      if (r.best.a) Lab.box(g, r.best.a.map((v) => v * k), { color: cA, width: 2, dash: [6, 3] });
+      g.fillStyle = cF;
+      for (const [x, y] of FC[S.focus].pts) { g.beginPath(); g.arc(x * k, y * k, 3.2, 0, 2 * Math.PI); g.fill(); }
+    }
+    const B = b.map((v) => v * k);
+    Lab.box(g, B, { color: cGT, width: 2.5, label: `${S.w} x ${S.h}` });
+    g.fillStyle = Lab.color("--surface"); g.strokeStyle = cGT; g.lineWidth = 1.5; g.fillRect(B[2] - 4, B[3] - 4, 8, 8); g.strokeRect(B[2] - 4, B[3] - 4, 8, 8);
+    g.restore();
+    Lab.$("#cap-img").innerHTML = `input image <small>${S.size} x ${S.size} px · grid of P${S.focus} (stride ${2 ** S.focus}, ${S.size / 2 ** S.focus} x ${S.size / 2 ** S.focus} cells)` +
+      (S.focus >= 3 ? ` · best P${S.focus} anchor (long dash): IoU ${RN.lv[S.focus].best.iou.toFixed(2)}` : "") + `</small>`;
+
+    // strip: the same window (in image px) on every level
+    const q = cstrip.ctx; cstrip.clear();
+    const win = Math.min(S.size, Math.max(64, 3 * Math.max(S.w, S.h)));
+    const wx = Lab.clamp(S.cx - win / 2, 0, S.size - win), wy = Lab.clamp(S.cy - win / 2, 0, S.size - win), z = SW / win;
+    LEVELS.forEach((L, idx) => {
+      const x0 = idx * (SW + SG), st = 2 ** L, C = coverage(L, b), n = C.n;
+      const sel = L === S.focus;
+      Lab.text(q, `P${L} · stride ${st}`, x0, 13, { size: 12, weight: sel ? 750 : 600, color: ink });
+      q.save(); q.beginPath(); q.rect(x0, SY, SW, SW); q.clip();
+      q.fillStyle = Lab.color("--wash"); q.fillRect(x0, SY, SW, SW);
+      const i0 = Math.max(0, Math.floor(wy / st)), i1 = Math.min(n - 1, Math.floor((wy + win) / st)), j0 = Math.max(0, Math.floor(wx / st)), j1 = Math.min(n - 1, Math.floor((wx + win) / st));
+      for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+        const c = C.cov[i * n + j]; if (!c) continue;
+        q.fillStyle = Lab.sequential(0.15 + 0.85 * c); q.fillRect(x0 + (j * st - wx) * z, SY + (i * st - wy) * z, st * z, st * z);
+      }
+      if (st * z >= 4) {
+        q.strokeStyle = Lab.alpha("--ink", 0.25); q.lineWidth = 1;
+        for (let j = j0; j <= j1 + 1; j++) { const v = Math.round(x0 + (j * st - wx) * z) + 0.5; q.beginPath(); q.moveTo(v, SY); q.lineTo(v, SY + SW); q.stroke(); }
+        for (let i = i0; i <= i1 + 1; i++) { const v = Math.round(SY + (i * st - wy) * z) + 0.5; q.beginPath(); q.moveTo(x0, v); q.lineTo(x0 + SW, v); q.stroke(); }
+      }
+      if (L >= 3) { q.fillStyle = cF; for (const [x, y] of FC[L].pts) { q.beginPath(); q.arc(x0 + (x - wx) * z, SY + (y - wy) * z, 2.6, 0, 2 * Math.PI); q.fill(); } }
+      Lab.box(q, [x0 + (b[0] - wx) * z, SY + (b[1] - wy) * z, x0 + (b[2] - wx) * z, SY + (b[3] - wy) * z], { color: cGT, width: 2 });
+      q.restore();
+      q.save(); q.strokeStyle = sel ? Lab.color("--hl") : Lab.color("--border"); q.lineWidth = sel ? 2.5 : 1; q.strokeRect(x0 + 0.5, SY + 0.5, SW - 1, SW - 1); q.restore();
+      let y = SY + SW + 15;
+      Lab.text(q, shape(256, n), x0, y, { size: 10.5, mono: true });
+      y += 15; Lab.text(q, `${(S.w / st).toFixed(2)} x ${(S.h / st).toFixed(2)} cells`, x0, y, { size: 11.5, weight: 650, color: S.w < st && S.h < st ? Lab.color("--bad") : ink });
+      const forcedHere = RN.forced && RN.forced.L === L;
+      y += 16; Lab.text(q, L === R.k ? "RoI rule: this level" : L > 5 ? "RoI rule: n/a" : "RoI rule: -", x0, y, { size: 11, color: L === R.k ? ink : muted, weight: L === R.k ? 650 : 400 });
+      y += 15; Lab.text(q, L === 2 ? "anchors: n/a" : forcedHere ? "anchors: best, forced" : `anchors: ${RN.lv[L].pos} pos`, x0, y, { size: 11, color: L >= 3 && (RN.lv[L].pos || forcedHere) ? ink : muted, weight: L >= 3 && (RN.lv[L].pos || forcedHere) ? 650 : 400 });
+      y += 15; Lab.text(q, L === 2 ? "FCOS: n/a" : `FCOS: ${FC[L].pts.length} points`, x0, y, { size: 11, color: L >= 3 && FC[L].pts.length ? ink : muted, weight: L >= 3 && FC[L].pts.length ? 650 : 400 });
+    });
+    Lab.$("#cap-strip").innerHTML = `the same ${Math.round(win)} x ${Math.round(win)} px window around the object on every level <small>(cell shade = fraction of the cell covered by the object; click a level to draw it above)</small>`;
+
+    // assignment table
+    const lvls = (arr) => (arr.length ? arr.map((L) => "P" + L).join(", ") : "none");
+    const bestAll = LEVELS.slice(1).map((L) => RN.lv[L].best).reduce((a, c) => (c.iou > a.iou ? c : a));
+    Lab.$("#assign").innerHTML =
+      `<tr><td>FPN RoI rule</td><td><b>P${R.k}</b> · two-stage RoIAlign picks one of P2-P5 by size</td></tr>` +
+      `<tr><td>RetinaNet</td><td><b>${RN.forced ? "P" + RN.forced.L + " (forced)" : lvls(retL)}</b> · ${RN.forced ? `no anchor reaches IoU 0.5; the best one (IoU ${RN.forced.iou.toFixed(2)}) is made positive anyway (low-quality match)` : `${retL.map((L) => RN.lv[L].pos).reduce((a, c) => a + c, 0)} anchors with IoU &ge; 0.5, best ${bestAll.iou.toFixed(2)} on P${bestAll.L}`}</td></tr>` +
+      `<tr><td>FCOS</td><td><b>${lvls(fcL)}</b> · ${fcL.map((L) => FC[L].pts.length).reduce((a, c) => a + c, 0)} points inside the box${S.cs ? " near its centre" : ""} whose max(l, t, r, b) is in the level's range</td></tr>`;
+    const m = Math.max(S.w, S.h) / 2;
+    const rng = (L) => (L === 3 ? "(0, 64)" : L === 7 ? "(512, inf)" : `(${4 * 2 ** L}, ${8 * 2 ** L})`);
+    const cL = [3, 4, 5, 6, 7].find((L) => m > (L === 3 ? 0 : 4 * 2 ** L) && m < (L === 7 ? Infinity : 8 * 2 ** L));
+    Lab.$("#formula").innerHTML =
+      `RoI: k = floor(4 + log2(sqrt(wh)/224))\n` +
+      `       = floor(4 + log2(${R.s.toFixed(1)}/224))\n` +
+      `       = floor(${R.raw.toFixed(2)}), clamp [2,5] -> <b>P${R.k}</b>\n` +
+      `RetinaNet: 32·2^(L-3)·{1, 1.26, 1.59} px\n` +
+      `  ratios {1:2, 1:1, 2:1}; IoU >= 0.5\n` +
+      `FCOS: max(l,t,r,b) in the level range:\n` +
+      `  P3 (0,64) P4 (64,128) .. P7 (512,inf)\n` +
+      `  centre point: max = ${m.toFixed(1)} -> <b>${cL ? "P" + cL : "none"}</b>`;
+    setRd(0, "FPN RoI rule", "P" + R.k);
+    setRd(1, "RetinaNet", RN.forced ? "P" + RN.forced.L + "*" : lvls(retL));
+    setRd(2, "FCOS", lvls(fcL));
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${cGT}"></i>object (ground truth)</span><span><i style="background:${Lab.alpha("--c4", 0.7)}"></i>cells it covers</span>` +
+      `<span><i style="background:${cA}"></i>anchors IoU &ge; 0.5 (best: long dash)</span><span><i style="background:${cF}"></i>FCOS positive points</span>`;
+  }
+
+  function drawPath() {
+    const g = cpath.ctx; cpath.clear();
+    const ink = Lab.color("--ink"), ink2 = Lab.color("--ink-2"), muted = Lab.color("--muted"), d = S.d;
+    const CH = S.backbone === "r50" ? [512, 1024, 2048] : [128, 256, 512];
+    const n = (L) => S.size / 2 ** L;
+    const rows = { 7: 22, 6: 84, 5: 150, 4: 232, 3: 314 };
+    const BW = 150, BH = 48, XC = 10, XP = 470, XM = 360;
+    const icon = (x, y, L) => { const sd = 6 + 30 * n(L) / n(3); g.fillStyle = Lab.alpha("--ink", 0.12); g.strokeStyle = Lab.alpha("--ink", 0.4); g.fillRect(x, y - sd / 2, sd, sd); g.strokeRect(x + 0.5, y - sd / 2 + 0.5, sd - 1, sd - 1); };
+    const tbox = (x, y, title, shp, fill, dash) => {
+      g.save(); g.fillStyle = fill; g.strokeStyle = Lab.alpha("--ink", 0.45); g.lineWidth = 1.2; g.setLineDash(dash || []);
+      g.beginPath(); g.roundRect(x, y, BW, BH, 7); g.fill(); g.stroke(); g.restore();
+      Lab.text(g, title, x + 10, y + 19, { size: 13, weight: 700, color: ink });
+      Lab.text(g, shp, x + 10, y + 37, { size: 11.5, mono: true, color: ink2 });
+    };
+    const arrow = (x0, y0, x1, y1, col, dash) => {
+      g.save(); g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1.8; g.setLineDash(dash || []);
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.setLineDash([]);
+      const a = Math.atan2(y1 - y0, x1 - x0);
+      g.beginPath(); g.moveTo(x1, y1); g.lineTo(x1 - 9 * Math.cos(a - 0.4), y1 - 9 * Math.sin(a - 0.4)); g.lineTo(x1 - 9 * Math.cos(a + 0.4), y1 - 9 * Math.sin(a + 0.4)); g.closePath(); g.fill(); g.restore();
+    };
+    const cB = Lab.alpha("--c1", 0.16), cP = Lab.alpha("--c3", 0.2), cX = Lab.alpha("--c3", 0.08), red = Lab.color("--c8");
+    Lab.text(g, `bottom-up (${S.backbone === "r50" ? "ResNet-50" : "ResNet-18"})`, XC, 14, { size: 12, weight: 700, color: ink });
+    Lab.text(g, "top-down + lateral", XM - 60, 14, { size: 12, weight: 700, color: ink });
+    Lab.text(g, "pyramid", XP, 14, { size: 12, weight: 700, color: ink });
+    [3, 4, 5].forEach((L, idx) => {
+      const y = rows[L];
+      tbox(XC, y, `C${L}  (stride ${2 ** L})`, shape(CH[idx], n(L)), cB);
+      tbox(XP, y, `P${L}`, shape(d, n(L)), cP);
+      icon(XP + BW + 10, y + BH / 2, L);
+      arrow(XC + BW, y + BH / 2, XM - 13, y + BH / 2, ink2);
+      Lab.text(g, `1x1 conv ${CH[idx]} -> ${d}`, XC + BW + 8, y + BH / 2 - 7, { size: 11, color: ink2 });
+      Lab.text(g, shape(d, n(L)), XC + BW + 8, y + BH / 2 + 15, { size: 10.5, mono: true, color: muted });
+      g.save(); g.strokeStyle = ink; g.fillStyle = Lab.color("--surface"); g.lineWidth = 1.5; g.beginPath(); g.arc(XM, y + BH / 2, 12, 0, 2 * Math.PI); g.fill(); g.stroke(); g.restore();
+      Lab.text(g, L === 5 ? "=" : "+", XM, y + BH / 2 + 1, { size: 15, weight: 700, align: "center", baseline: "middle", color: ink });
+      arrow(XM + 12, y + BH / 2, XP - 2, y + BH / 2, ink2);
+      Lab.text(g, "3x3 conv", XM + 20, y + BH / 2 - 7, { size: 11, color: ink2 });
+    });
+    for (const [La, Lb] of [[5, 4], [4, 3]]) {
+      arrow(XM, rows[La] + BH / 2 + 12, XM, rows[Lb] + BH / 2 - 13, red);
+      Lab.text(g, "upsample x2 (nearest)", XM + 8, (rows[La] + rows[Lb]) / 2 + BH / 2 + 4, { size: 11, color: ink2 });
+    }
+    for (const [La, Lb] of [[3, 4], [4, 5]]) arrow(XC + 40, rows[La], XC + 40, rows[Lb] + BH + 1, muted);
+    // RetinaNet extras
+    tbox(XP, rows[6], "P6  (RetinaNet)", shape(d, n(6)), cX, [5, 4]); icon(XP + BW + 10, rows[6] + BH / 2, 6);
+    tbox(XP, rows[7], "P7  (RetinaNet)", shape(d, n(7)), cX, [5, 4]); icon(XP + BW + 10, rows[7] + BH / 2, 7);
+    arrow(XP + 30, rows[5], XP + 30, rows[6] + BH + 1, muted, [4, 3]);
+    arrow(XP + 30, rows[6], XP + 30, rows[7] + BH + 1, muted, [4, 3]);
+    Lab.text(g, "3x3 conv, stride 2", XP - 112, rows[6] + BH + 14, { size: 10.5, color: muted });
+    Lab.text(g, "ReLU, 3x3 s2", XP - 80, rows[7] + BH + 12, { size: 10.5, color: muted });
+    Lab.text(g, `input ${shape(3, S.size).replace("(1, 3,", "(1, 3,")}  ->  stem + layer1 (stride 4)  ->  C3`, XC, 386, { size: 11, color: muted });
+    // parameters
+    const lat = CH.map((c) => c * d + d), smooth = 9 * d * d + d, p67 = 2 * smooth;
+    const tot = lat.reduce((a, b) => a + b, 0) + 3 * smooth;
+    const locs = [3, 4, 5, 6, 7].reduce((a, L) => a + n(L) ** 2, 0);
+    Lab.$("#formula2").innerHTML =
+      `lateral 1x1 convs (c*d weights + d biases):\n  ${CH.map((c, i) => `${c}*${d}+${d} = ${fmt(lat[i])}`).join(" | ")}\n` +
+      `smooth 3x3 convs: 9*${d}*${d}+${d} = ${fmt(smooth)} each, x 3\n` +
+      `FPN (P3-P5) parameters = ${fmt(lat.reduce((a, b) => a + b, 0))} + 3*${fmt(smooth)} = <b>${fmt(tot)}</b>\n` +
+      `P6 + P7 (RetinaNet extras, on P5) = 2*${fmt(smooth)} = ${fmt(p67)}\n` +
+      `locations P3-P7 = ${[3, 4, 5, 6, 7].map((L) => n(L) + "^2").join(" + ")} = ${fmt(locs)}\n` +
+      `  x 9 anchors each = ${fmt(9 * locs)} anchors`;
+    Lab.$("#cap-path").innerHTML = `top-down pathway, shapes for a batch of one ${S.size} x ${S.size} image <small>(the notebook's FPN exercise: forward([C3, C4, C5]) -> [P3, P4, P5])</small>`;
+    setRd(0, "P3 shape", shape(d, n(3)));
+    setRd(1, "FPN params", fmt(tot));
+    setRd(2, "anchors P3-P7", fmt(9 * locs));
+    Lab.$("#legend").innerHTML = `<span><i style="background:${red}"></i>top-down (upsample + add)</span><span><i style="background:${Lab.alpha("--c3", 0.6)}"></i>pyramid output</span>`;
+  }
+  function draw() { if (S.view === "levels") drawLevels(); else drawPath(); }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

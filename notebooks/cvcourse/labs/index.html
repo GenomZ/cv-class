@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interactive labs</title>
+<link rel="stylesheet" href="lab.css">
+<style>
+  .day { margin: 22px 0 8px; font-size: 13px; font-weight: 700; color: var(--ink-2); text-transform: uppercase; letter-spacing: .05em; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+  a.card { display: block; text-decoration: none; color: inherit; border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; background: var(--surface); }
+  a.card:hover { border-color: var(--accent); background: var(--wash); }
+  a.card b { display: block; font-size: 14.5px; margin: 3px 0 3px; }
+  a.card span.s { color: var(--ink-2); font-size: 12.5px; }
+</style>
+</head>
+<body class="standalone">
+<div class="lab">
+  <div class="lab-head"><h1>Interactive labs</h1><span class="lab-tag">26 labs · offline · no install</span></div>
+  <p class="lab-lede">One mechanism per page. Predict what will happen, then drag, paint and slide to check. Every lab is also
+    embedded in its notebook with <code>labs.show("name")</code>.</p>
+  <div class="day">Day 1 · ConvNets: from pixels to transfer learning</div>
+  <div class="cards">
+    <a class="card" href="conv-playground.html"><span class="lab-tag">D1-01</span><b>Convolution playground</b><span class="s">Edit a 3x3 kernel and watch the output; hover any pixel to see patch x kernel = one number. Stride, padding, dilation.</span></a>
+    <a class="card" href="receptive-field.html"><span class="lab-tag">D1-01</span><b>Receptive field explorer</b><span class="s">Stack conv / pool / dilated layers, click any unit and see exactly which input pixels it depends on; r and jump per layer with the recursion filled in.</span></a>
+    <a class="card" href="lr-schedule.html"><span class="lab-tag">D1-02</span><b>Learning-rate schedule designer</b><span class="s">Constant, step decay, warm-up + cosine and torch&#x27;s OneCycleLR side by side; drag the cursor to read the LR at any step with the formula filled in.</span></a>
+    <a class="card" href="mixup-cutmix.html"><span class="lab-tag">D1-02</span><b>Mixup and CutMix</b><span class="s">Blend or cut-and-paste two images and watch the soft label follow; drag the CutMix box, sample lambda ~ Beta(alpha, alpha) and see what alpha does.</span></a>
+    <a class="card" href="optimizer-playground.html"><span class="lab-tag">D1-02</span><b>Optimizer playground</b><span class="s">SGD, SGD + momentum and AdamW race on 2-D loss surfaces: drag the start, change the learning rates and momentum, inspect every update.</span></a>
+    <a class="card" href="block-cost.html"><span class="lab-tag">D1-03</span><b>What does a block cost?</b><span class="s">Same input, four blocks: standard conv, ResNet bottleneck, depthwise-separable, Inception-style 1x1 then kxk. Parameters and multiply-adds with the formulas filled in.</span></a>
+    <a class="card" href="gradient-flow.html"><span class="lab-tag">D1-03</span><b>Gradient flow: plain vs residual</b><span class="s">A real forward and backward pass through a deep random ReLU network: per-layer gradient norms, plain vs identity skip connections, with or without BatchNorm, three initialisation scales.</span></a>
+    <a class="card" href="freeze-unfreeze.html"><span class="lab-tag">D1-04</span><b>Freeze, unfreeze, discriminative LRs</b><span class="s">ResNet-50 by stage with its true parameter counts: click to freeze / unfreeze, set base LR and decay, and read off trainable parameters, per-group learning rates and the transfer regime.</span></a>
+    <a class="card" href="gradcam-by-hand.html"><span class="lab-tag">D1-04</span><b>Grad-CAM by hand</b><span class="s">Grad-CAM as a visible weighted sum: eight feature maps of the photo, one weight alpha_k each, the sum, the ReLU and the upsampled heat map; presets play the pooled gradients of three classes.</span></a>
+  </div>
+  <div class="day">Day 2 · Object detection</div>
+  <div class="cards">
+    <a class="card" href="iou-playground.html"><span class="lab-tag">D2-01</span><b>IoU playground</b><span class="s">Drag and resize a prediction against a ground-truth box: intersection, union, enclosing box, IoU / GIoU / DIoU / CIoU live, gradient arrows, and the loss curves that show why 1 - IoU is flat once the boxes stop overlapping.</span></a>
+    <a class="card" href="nms-playground.html"><span class="lab-tag">D2-01</span><b>NMS playground</b><span class="s">Step through greedy NMS, linear / Gaussian Soft-NMS and class-wise NMS on scored candidate boxes; drag boxes, move the IoU and score thresholds, and see when NMS deletes a real object.</span></a>
+    <a class="card" href="pr-curve.html"><span class="lab-tag">D2-01</span><b>PR curve and AP</b><span class="s">Re-rank the notebook&#x27;s 8 detections, flip TP / FP, change the number of objects and the score threshold: the precision-recall curve, its envelope, AP (all-points, 11-point, 101-point) and P / R / F1 update live.</span></a>
+    <a class="card" href="anchor-matching.html"><span class="lab-tag">D2-02</span><b>Anchor matching</b><span class="s">Drag ground-truth boxes over a grid of anchors and watch the IoU rule label each anchor positive, ignored or negative. Stride, scales, ratios, thresholds, low-quality matches.</span></a>
+    <a class="card" href="box-encoding.html"><span class="lab-tag">D2-02</span><b>Box encoding</b><span class="s">Drag an anchor and a ground-truth box and read the regression target (tx, ty, tw, th); set predicted deltas and watch the decoded box; smooth-L1 vs L1 vs L2.</span></a>
+    <a class="card" href="roi-align.html"><span class="lab-tag">D2-02</span><b>RoI pooling vs RoIAlign</b><span class="s">Drag a region of interest over an 8x8 feature map: RoI pooling rounds the box and its bins, RoIAlign samples bilinearly at exact positions. Hover a sample to see its 4 neighbours and weights.</span></a>
+    <a class="card" href="focal-loss.html"><span class="lab-tag">D2-03</span><b>Focal loss</b><span class="s">CE vs focal loss as a function of p_t, then the population view: who contributes the total loss (or gradient) when 100 000 easy negatives meet 20 hard positives.</span></a>
+    <a class="card" href="fpn-levels.html"><span class="lab-tag">D2-03</span><b>FPN levels</b><span class="s">Resize one object and see which pyramid level P2-P7 gets it under the FPN RoI rule, RetinaNet anchor matching and FCOS ranges; plus the top-down pathway with live tensor shapes.</span></a>
+    <a class="card" href="grid-assignment.html"><span class="lab-tag">D2-03</span><b>Grid assignment</b><span class="s">Drag shapes over a G x G grid: the cell holding each box centre is responsible. Watch the (G, G, 5 + C) target tensor, collisions, and how rare positive cells are.</span></a>
+    <a class="card" href="hungarian-matching.html"><span class="lab-tag">D2-04</span><b>Hungarian matching</b><span class="s">Drag DETR&#x27;s object queries over the ground-truth boxes: the class + L1 + GIoU cost matrix, the optimal one-to-one matching, the &#x27;no object&#x27; queries, and why greedy matching is not enough.</span></a>
+  </div>
+  <div class="day">Day 3 · Segmentation and the frontier</div>
+  <div class="cards">
+    <a class="card" href="seg-metrics.html"><span class="lab-tag">D3-01</span><b>Segmentation metrics</b><span class="s">Paint a prediction mask over a ground truth and watch TP / FP / FN / TN, the confusion matrix, pixel accuracy, precision, recall, IoU and Dice move.</span></a>
+    <a class="card" href="transposed-conv.html"><span class="lab-tag">D3-01</span><b>Transposed convolution</b><span class="s">Step through a transposed convolution: every input value stamps a scaled copy of the kernel into the output. Count the overlaps and watch the checkerboard appear; compare with resize + conv.</span></a>
+    <a class="card" href="sliding-window.html"><span class="lab-tag">D3-02</span><b>Sliding-window inference</b><span class="s">Tile a big image into overlapping windows: see the tiles, how many cover each pixel, the forward-pass cost, and how overlap and Gaussian blending hide the weak predictions near tile borders.</span></a>
+    <a class="card" href="unet-shapes.html"><span class="lab-tag">D3-02</span><b>U-Net shapes</b><span class="s">The U-Net drawn with the tensor shape of every block: change input size, depth, width, skips and upsampling, see where parameters and activation memory live, and where an awkward input size breaks the concat.</span></a>
+    <a class="card" href="mask-paste.html"><span class="lab-tag">D3-03</span><b>Mask paste-back</b><span class="s">Mask R-CNN stretches one fixed 28x28 soft mask over every box: drag and resize the box, change the mask resolution and the threshold, hover a pixel to see its 4 bilinear weights.</span></a>
+    <a class="card" href="clip-zero-shot.html"><span class="lab-tag">D3-04</span><b>CLIP zero-shot geometry</b><span class="s">Zero-shot classification as geometry: drag an image embedding and the text-prompt embeddings around a circle; cosine -&gt; logit scale -&gt; softmax, normalisation, prompt ensembling, add a class.</span></a>
+    <a class="card" href="patch-attention.html"><span class="lab-tag">D3-04</span><b>Patches and attention</b><span class="s">Cut the photo into p x p patches (tokens), then click a patch: softmax(q.k / sqrt(d)) over all patches, temperature, position encoding, and shuffling the patches.</span></a>
+  </div>
+</div>
+<script src="lab.js"></script>
+</body>
+</html>

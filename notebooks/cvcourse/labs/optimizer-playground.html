@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Optimizer playground</title>
+<meta name="lab-notebook" content="D1-02">
+<meta name="lab-summary" content="SGD, SGD + momentum and AdamW race on 2-D loss surfaces: drag the start, change the learning rates and momentum, inspect every update.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .chip { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .optblock { display: flex; flex-direction: column; gap: 9px; }
+  #formula { margin-top: 10px; }
+  .readouts .readout { min-width: 0; flex: 1 1 70px; }
+  .readouts .readout .v { font-size: 15px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Optimizer playground</h1><span class="lab-tag">D1-02 · section 5</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Three optimisers start from the same point on a 2-D loss: drag the start, change the learning rates, click
+    the loss chart to inspect one update. Exactly <code>torch.optim.SGD</code>, <code>SGD(momentum=μ)</code>, <code>AdamW</code>
+    (default betas, weight_decay 0).</p>
+
+  <div class="lab-stage">
+    <div>
+      <figure class="lab-fig" style="max-width:522px"><figcaption id="cap-map">loss surface</figcaption><div id="fig-map"></div></figure>
+      <figure class="lab-fig" style="max-width:522px;margin-top:10px"><figcaption>loss vs step <small>log scale; click or drag to inspect a step</small></figcaption><div id="fig-loss"></div></figure>
+      <div class="formula" id="formula"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-surf"></div>
+      <div class="optblock" id="c-lr"></div>
+      <div id="c-more" class="lab-controls"></div>
+      <div class="btn-row" id="c-btn"></div>
+      <div><p class="lab-cap" style="margin-bottom:4px">loss after the last step</p><div class="readouts" id="readouts"></div></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>On the <b>ravine</b> SGD zig-zags at η = 0.9. Predict η = 1.1, then drag there. Which optimiser takes the largest η before it blows up?
+        <details><summary>why</summary><p>SGD multiplies the across-ravine coordinate by (1 − 2η) per step; for η &gt; 1 every bounce grows
+          and the loss explodes. Momentum survives up to 2η &lt; 2(1 + μ). AdamW never explodes (each coordinate moves about η per step)
+          but at large η it rattles around the minimum. No single SGD η is fast along the ravine and stable across it: that is
+          ill-conditioning.</p></details></li>
+      <li>Set μ = 0: orange becomes plain SGD with η = 0.09 and crawls. Back to μ = 0.9: why no zig-zag, although it now moves 10x faster along the ravine?
+        <details><summary>why</summary><p>The velocity b sums the gradients. Across the ravine they flip sign at every crossing and cancel;
+          along it they always agree and add up to about 1 / (1 − μ) = 10 steps. You get a smooth, slightly overshooting swing. At
+          μ = 0.99 the overshoot dominates and the path circles for a long time.</p></details></li>
+      <li>Inspect step 1 (click the loss chart near t = 1). The gradient is 8x larger across the ravine, yet AdamW moves both coordinates equally. Why?
+        <details><summary>why</summary><p>At t = 1, m̂ = g and √v̂ = |g|, so Δw = −η sign(g): exactly η per coordinate, whatever the gradient's
+          size. Adam rescales every coordinate by its own recent gradient magnitude; that is why its path starts at 45° and why Adam's
+          η is roughly a step size in weight units.</p></details></li>
+      <li>Switch to the <b>saddle</b> (start just off the ridge w1 = 0). Who escapes first, and why does SGD hesitate?
+        <details><summary>why</summary><p>Near the ridge the w1-gradient is tiny (about −w1), so SGD's step η g is tiny and it first drifts
+          towards the saddle point. AdamW divides the tiny gradient by its tiny running RMS and steps away at about η per step. Plateaus
+          and saddles are common in real networks. Start exactly on w1 = 0 and nobody escapes: there is no w1 gradient at all.</p></details></li>
+      <li>On the <b>curved valley</b>, raise momentum's η from 0.003 to 0.03. Where does it go wrong?
+        <details><summary>why</summary><p>The valley walls get steeper as |w0| grows (curvature across the valley about 20(1 + 4 w0²)).
+          η = 0.03 is stable near w0 = 0 but not on the steep parts; the velocity carries the path past the minimum onto the steep
+          wall, the bounces grow, and it is thrown out after about 20 steps. The safe η is set by the sharpest region the path
+          visits, and momentum makes it visit more.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+// ---- maths (pure; updates identical to torch.optim.SGD / SGD(momentum) / AdamW, checked against torch)
+const OPT = (() => {
+  const SURF = {
+    ravine: {
+      label: "ravine",
+      f: (x, y) => 0.5 * (0.05 * x * x + 2 * y * y),
+      g: (x, y) => [0.05 * x, 2 * y],
+      text: "L(w) = ½ (0.05 w0² + 2 w1²), curvature 40x larger across than along",
+      view: [-12, 4, -4, 4], start: [-10, 2], marks: [[0, 0, "minimum"]], levels: [0.01, 20, 14],
+      lr: { sgd: 0.9, mom: 0.09, adam: 0.3 }, steps: 60, yr: [-6, 2],
+    },
+    saddle: {
+      label: "saddle",
+      f: (x, y) => 0.5 * x * x - 0.5 * y * y + 0.25 * y ** 4 + 0.25,
+      g: (x, y) => [x, -y + y ** 3],
+      text: "L(w) = ½ w0² − ½ w1² + ¼ w1⁴ + ¼, saddle at (0, 0)",
+      view: [-3, 3, -1.5, 1.5], start: [-2.5, 0.03], marks: [[0, 1, "minimum"], [0, -1, "minimum"], [0, 0, "saddle"]], levels: [0.005, 5, 14],
+      lr: { sgd: 0.05, mom: 0.05, adam: 0.05 }, steps: 60, yr: [-6, 1],
+    },
+    valley: {
+      label: "curved valley",
+      f: (x, y) => (1 - x) ** 2 + 10 * (y - x * x) ** 2,
+      g: (x, y) => [-2 * (1 - x) - 40 * x * (y - x * x), 20 * (y - x * x)],
+      text: "L(w) = (1 − w0)² + 10 (w1 − w0²)², minimum at (1, 1)",
+      view: [-2.2, 2.2, -0.4, 1.8], start: [-1.2, 1.0], marks: [[1, 1, "minimum"]], levels: [0.01, 300, 16],
+      lr: { sgd: 0.02, mom: 0.003, adam: 0.1 }, steps: 150, yr: [-6, 2],
+    },
+  };
+  /** Run one optimiser for `steps` steps. kind: "sgd" | "mom" | "adam". hp: {lr, mu}.
+   *  Returns {path: [[w0, w1], ...], loss: [...], info: [per step t: {w, g, b | mh, vh, dw}], diverged: step or 0} */
+  function run(surf, kind, start, steps, hp) {
+    const S = SURF[surf];
+    let w = start.slice();
+    const path = [w.slice()], loss = [S.f(w[0], w[1])], info = [null];
+    let b = null, m = [0, 0], v = [0, 0];
+    const b1 = 0.9, b2 = 0.999, eps = 1e-8;
+    for (let t = 1; t <= steps; t++) {
+      const g = S.g(w[0], w[1]);
+      let dw;
+      const rec = { w: w.slice(), g };
+      if (kind === "sgd") {
+        dw = [-hp.lr * g[0], -hp.lr * g[1]];
+      } else if (kind === "mom") {
+        b = b ? [hp.mu * b[0] + g[0], hp.mu * b[1] + g[1]] : g.slice();     // torch: buf = g at the first step
+        dw = [-hp.lr * b[0], -hp.lr * b[1]];
+        rec.b = b.slice();
+      } else {
+        m = [b1 * m[0] + (1 - b1) * g[0], b1 * m[1] + (1 - b1) * g[1]];
+        v = [b2 * v[0] + (1 - b2) * g[0] * g[0], b2 * v[1] + (1 - b2) * g[1] * g[1]];
+        const bc1 = 1 - b1 ** t, bc2 = 1 - b2 ** t;
+        // torch: denom = sqrt(v) / sqrt(bc2) + eps; w -= (lr / bc1) * m / denom
+        const den = [Math.sqrt(v[0]) / Math.sqrt(bc2) + eps, Math.sqrt(v[1]) / Math.sqrt(bc2) + eps];
+        dw = [-(hp.lr / bc1) * m[0] / den[0], -(hp.lr / bc1) * m[1] / den[1]];
+        rec.mh = [m[0] / bc1, m[1] / bc1]; rec.vh = [Math.sqrt(v[0] / bc2), Math.sqrt(v[1] / bc2)];
+      }
+      w = [w[0] + dw[0], w[1] + dw[1]];
+      rec.dw = dw;
+      const L = S.f(w[0], w[1]);
+      if (!Number.isFinite(L) || Math.abs(w[0]) > 1e6 || Math.abs(w[1]) > 1e6) return { path, loss, info, diverged: t };
+      path.push(w.slice()); loss.push(L); info.push(rec);
+    }
+    return { path, loss, info, diverged: 0 };
+  }
+  return { SURF, run };
+})();
+// ---- end maths
+
+(() => {
+  const KINDS = [
+    { key: "sgd", name: "SGD", short: "SGD", color: "--c1" },
+    { key: "mom", name: "SGD + momentum", short: "momentum", color: "--c2" },
+    { key: "adam", name: "AdamW", short: "AdamW", color: "--c4" },
+  ];
+  const S = Lab.params({ surface: "ravine", lr_sgd: NaN, lr_mom: NaN, lr_adam: NaN, mu: 0.9, steps: NaN, x0: NaN, y0: NaN, t: 1, link: false });
+  if (!OPT.SURF[S.surface]) S.surface = "ravine";
+  const D = () => OPT.SURF[S.surface];
+  const lr = {};
+  function defaults(keepGiven) {
+    const d = D();
+    for (const k of KINDS) { const v = S["lr_" + k.key]; lr[k.key] = keepGiven && v > 0 ? v : d.lr[k.key]; }
+    if (!(keepGiven && S.steps >= 1)) S.steps = d.steps;
+    if (!(keepGiven && Number.isFinite(S.x0) && Number.isFinite(S.y0))) { S.x0 = d.start[0]; S.y0 = d.start[1]; }
+  }
+  defaults(true);
+
+  // ---- canvases
+  const MW = 520, MH = 260;
+  const cmap = Lab.canvas("#fig-map", MW, MH, { framed: true });
+  const LH = 132;
+  const closs = Lab.canvas("#fig-loss", MW, LH);
+  const toPx = (x, y) => { const [a, b, c, d] = D().view; return [((x - a) / (b - a)) * MW, MH - ((y - c) / (d - c)) * MH]; };
+  const toW = (px, py) => { const [a, b, c, d] = D().view; return [a + (px / MW) * (b - a), c + ((MH - py) / MH) * (d - c)]; };
+
+  let field = null, fieldKey = "";
+  function surfaceImage() {
+    const key = S.surface + Lab.color("--surface") + Lab.color("--ink");
+    if (field && fieldKey === key) return field;
+    const d = D(), [lo, hi, n] = d.levels;
+    const levels = Array.from({ length: n }, (_, i) => lo * (hi / lo) ** (i / (n - 1)));
+    const W = MW, H = MH, band = new Uint8Array(W * H);
+    for (let py = 0; py < H; py++) for (let px = 0; px < W; px++) {
+      const [x, y] = toW(px + 0.5, py + 0.5), L = d.f(x, y);
+      let b = 0; while (b < n && L > levels[b]) b++;
+      band[py * W + px] = b;
+    }
+    const surf = Lab.rgb(Lab.color("--surface")), ink = Lab.rgb(Lab.color("--ink"));
+    const mix = (t) => surf.map((s, i) => Math.round(s + (ink[i] - s) * t));
+    const fills = Array.from({ length: n + 1 }, (_, b) => mix(0.015 + (0.2 * b) / n)), line = mix(0.34);
+    const off = document.createElement("canvas"); off.width = W; off.height = H;
+    const octx = off.getContext("2d"), im = octx.createImageData(W, H);
+    for (let i = 0; i < W * H; i++) {
+      const x = i % W, edge = (x < W - 1 && band[i + 1] !== band[i]) || (i + W < W * H && band[i + W] !== band[i]);
+      const c = edge ? line : fills[band[i]];
+      im.data[4 * i] = c[0]; im.data[4 * i + 1] = c[1]; im.data[4 * i + 2] = c[2]; im.data[4 * i + 3] = 255;
+    }
+    octx.putImageData(im, 0, 0);
+    field = off; fieldKey = key;
+    return off;
+  }
+
+  // ---- controls
+  const surf = Lab.segmented("#c-surf", {
+    label: "loss surface", options: Object.entries(OPT.SURF).map(([k, v]) => ({ value: k, label: v.label })), value: S.surface,
+    onChange: (v) => { S.surface = v; defaults(false); S.t = 1; syncSliders(); redraw(); },
+  });
+  const sliders = {};
+  const lrOf = (v) => +(10 ** v).toPrecision(2);                    // slider position (log10) -> η, 2 significant digits
+  const fmtLr = (v) => String(lrOf(v));
+  for (const k of KINDS) {
+    sliders[k.key] = Lab.slider("#c-lr", {
+      label: `${k.name}: η`, min: -3, max: 0.5, step: 0.002, value: Math.log10(lr[k.key]), fmt: fmtLr,
+      onInput: (v) => {
+        const x = lrOf(v);
+        if (S.link) for (const j of KINDS) { lr[j.key] = x; sliders[j.key].set(v); } else lr[k.key] = x;
+        redraw();
+      },
+    });
+    const lab = sliders[k.key].el.querySelector(".ctl-label span");
+    lab.prepend(Lab.el("i", { class: "chip", style: `background:var(${k.color})` }));
+  }
+  const muS = Lab.slider("#c-more", { label: "momentum μ (SGD + momentum)", min: 0, max: 0.99, step: 0.01, value: S.mu, fmt: (v) => v.toFixed(2), onInput: (v) => { S.mu = v; redraw(); } });
+  const stepsS = Lab.slider("#c-more", { label: "steps", min: 5, max: 300, step: 1, value: S.steps, onInput: (v) => { S.steps = v; redraw(); } });
+  Lab.toggle("#c-more", { label: "one η for all three", value: S.link, onChange: (v) => {
+    S.link = v;
+    if (v) { for (const j of KINDS) { lr[j.key] = lr.sgd; sliders[j.key].set(Math.log10(lr.sgd)); } redraw(); }
+  } });
+  Lab.button("#c-btn", "reset this surface", () => { defaults(false); S.mu = 0.9; S.t = 1; syncSliders(); redraw(); });
+  function syncSliders() {
+    for (const k of KINDS) sliders[k.key].set(Math.log10(lr[k.key]));
+    muS.set(S.mu); stepsS.set(S.steps); surf.set(S.surface);
+  }
+  const ro = {};
+  for (const k of KINDS) ro[k.key] = Lab.readout("#readouts", k.short);
+
+  // ---- pointer: the map moves the start, the loss chart picks the inspected step
+  const setStart = (p) => { const [x, y] = toW(p.x, p.y); S.x0 = +x.toFixed(3); S.y0 = +y.toFixed(3); redraw(); };
+  Lab.pointer(cmap, { down: setStart, move: setStart });
+  let lossAx = null;
+  const pickT = (p) => { if (!lossAx) return; S.t = Lab.clamp(Math.round(lossAx.ix(p.x)), 1, S.steps); redraw(); };
+  Lab.pointer(closs, { down: pickT, move: pickT });
+
+  const fmtN = (v) => {
+    if (!Number.isFinite(v)) return "inf";
+    const a = Math.abs(v);
+    if (a === 0) return "0";
+    if (a >= 1e4 || a < 1e-3) return v.toExponential(1).replace("e+", "e");
+    return String(+v.toPrecision(3));
+  };
+  const vec = (v) => `(${fmtN(v[0])}, ${fmtN(v[1])})`;
+
+  function draw() {
+    const d = D();
+    S.t = Lab.clamp(S.t, 1, S.steps);
+    const start = [S.x0, S.y0];
+    const runs = KINDS.map((k) => ({ k, r: OPT.run(S.surface, k.key, start, S.steps, { lr: lr[k.key], mu: S.mu }) }));
+
+    // ---- map
+    const g = cmap.ctx; cmap.clear();
+    g.drawImage(surfaceImage(), 0, 0, MW, MH);
+    for (const [x, y, name] of d.marks) {
+      const [px, py] = toPx(x, y);
+      g.save(); g.strokeStyle = Lab.color("--ink"); g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(px - 5, py); g.lineTo(px + 5, py); g.moveTo(px, py - 5); g.lineTo(px, py + 5); g.stroke(); g.restore();
+    }
+    g.save(); g.beginPath(); g.rect(0, 0, MW, MH); g.clip();
+    for (const { k, r } of runs) {
+      const col = Lab.color(k.color);
+      g.strokeStyle = col; g.lineWidth = 2; g.lineJoin = "round";
+      g.beginPath(); r.path.forEach((w, i) => { const [px, py] = toPx(w[0], w[1]); i ? g.lineTo(px, py) : g.moveTo(px, py); }); g.stroke();
+      g.fillStyle = col;
+      for (const w of r.path) { const [px, py] = toPx(w[0], w[1]); g.beginPath(); g.arc(px, py, 1.7, 0, 2 * Math.PI); g.fill(); }
+      if (!r.diverged) {
+        const [px, py] = toPx(...r.path[r.path.length - 1]);
+        g.strokeStyle = Lab.color("--surface"); g.lineWidth = 2; g.beginPath(); g.arc(px, py, 4.5, 0, 2 * Math.PI); g.fill(); g.stroke();
+      }
+    }
+    // inspected step: where each optimiser is after step t
+    for (const { r } of runs) {
+      if (S.t >= r.path.length) continue;
+      const [px, py] = toPx(...r.path[S.t]);
+      g.strokeStyle = Lab.color("--ink"); g.lineWidth = 1.5; g.beginPath(); g.arc(px, py, 6, 0, 2 * Math.PI); g.stroke();
+    }
+    g.restore();
+    for (const [x, y, name] of d.marks) {                 // labels on top of the paths, with a halo
+      const [px, py] = toPx(x, y);
+      g.save(); g.font = '11px system-ui, -apple-system, "Segoe UI", sans-serif'; g.lineWidth = 3; g.strokeStyle = Lab.color("--surface");
+      g.strokeText(name, px + 7, py + 14); g.fillStyle = Lab.color("--ink-2"); g.fillText(name, px + 7, py + 14); g.restore();
+    }
+    const [sx, sy] = toPx(S.x0, S.y0);
+    g.fillStyle = Lab.color("--surface"); g.strokeStyle = Lab.color("--ink"); g.lineWidth = 2;
+    g.beginPath(); g.rect(sx - 5, sy - 5, 10, 10); g.fill(); g.stroke();
+    const [a, b, c, e] = d.view;
+    Lab.text(g, `w0 from ${a} to ${b}, w1 from ${c} to ${e}`, MW - 6, MH - 6, { align: "right", size: 10.5, color: Lab.color("--muted") });
+    Lab.$("#cap-map").innerHTML = `loss surface <small>${d.text}; click or drag to move the start</small>`;
+
+    // ---- loss chart (log10)
+    const h = closs.ctx; closs.clear();
+    const [y0, y1] = d.yr;
+    const ax = Lab.axes(h, {
+      x: 48, y: 8, w: MW - 58, h: LH - 46, xmin: 0, xmax: S.steps, ymin: y0, ymax: y1, xlabel: "step", ylabel: "loss (log)",
+      yticks: Array.from({ length: y1 - y0 + 1 }, (_, i) => y0 + i).filter((v, i, arr) => arr.length < 7 || (v - y0) % 2 === 0),
+      yfmt: (v) => (v === 0 ? "1" : `1e${v}`),
+    });
+    lossAx = ax;
+    const lg = (L) => Math.log10(Math.max(L, 1e-12));
+    for (const { k, r } of runs) {
+      const pts = r.loss.map((L, i) => [i, lg(L)]);
+      if (r.diverged) pts.push([r.diverged, y1 + 5]);
+      ax.line(pts, Lab.color(k.color), 2);
+    }
+    h.save(); h.strokeStyle = Lab.color("--ink-2"); h.setLineDash([3, 3]); h.lineWidth = 1;
+    h.beginPath(); h.moveTo(ax.sx(S.t), 8); h.lineTo(ax.sx(S.t), LH - 38); h.stroke(); h.restore();
+    for (const { k, r } of runs) if (S.t < r.loss.length && lg(r.loss[S.t]) >= y0) ax.dot(S.t, Math.min(y1, lg(r.loss[S.t])), Lab.color(k.color), 4);
+    Lab.text(h, `t = ${S.t}`, Lab.clamp(ax.sx(S.t) + 5, 52, MW - 40), 20, { size: 11, color: Lab.color("--ink") });
+
+    // ---- the update at step t, numbers filled in
+    let txt = `update at step t = ${S.t}, from w_${S.t - 1} to w_${S.t}\n`;
+    for (const { k, r } of runs) {
+      const name = k.short.padEnd(10);
+      if (S.t >= r.path.length) { txt += `${name}diverged at step ${r.diverged} (|w| or the loss overflowed)\n`; continue; }
+      const I = r.info[S.t];
+      if (k.key === "sgd") txt += `${name}g = ${vec(I.g)};  Δw = −η·g = <b>${vec(I.dw)}</b>\n`;
+      else if (k.key === "mom") txt += `${name}b = μ·b + g = ${vec(I.b)};  Δw = −η·b = <b>${vec(I.dw)}</b>\n`;
+      else txt += `${name}m̂ = ${vec(I.mh)},  √v̂ = ${vec(I.vh)}\n${" ".repeat(10)}Δw = −η·m̂/(√v̂+ε) = <b>${vec(I.dw)}</b>\n`;
+    }
+    Lab.$("#formula").innerHTML = txt.trimEnd();
+
+    for (const { k, r } of runs) {
+      if (r.diverged) ro[k.key].set(`diverged @${r.diverged}`, "bad");
+      else { const L = r.loss[r.loss.length - 1]; ro[k.key].set(fmtN(L), L > r.loss[0] ? "bad" : ""); }   // ✗ = worse than the start
+    }
+    Lab.$("#legend").innerHTML = KINDS.map((k) => `<span><i style="background:${Lab.color(k.color)}"></i>${k.name}</span>`).join("") +
+      `<span><i style="border:2px solid ${Lab.color("--ink")};background:${Lab.color("--surface")}"></i>start (drag)</span>` +
+      `<span><i style="border:1.5px solid ${Lab.color("--ink")};border-radius:50%;background:transparent"></i>position after step t</span>`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

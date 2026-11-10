@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Focal loss</title>
+<meta name="lab-notebook" content="D2-03">
+<meta name="lab-summary" content="CE vs focal loss as a function of p_t, then the population view: who contributes the total loss (or gradient) when 100 000 easy negatives meet 20 hard positives.">
+<meta name="lab-height" content="860">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .figrow { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 290fr); gap: 16px; align-items: start; }
+  .figrow canvas.lab-canvas { width: 100%; }
+  .under { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-top: 8px; }
+  .under .wide { grid-column: 1 / -1; }
+  .under .ctl-value { white-space: nowrap; }
+  @media (max-width: 520px) { .figrow { grid-template-columns: minmax(0, 1fr); } }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Focal loss</h1><span class="lab-tag">D2-03 · section 5</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">Left: one example. Drag the marker along <i>p<sub>t</sub></i> (the predicted probability of the true label) and see
+    how much the modulating factor (1 - <i>p<sub>t</sub></i>)<sup>&gamma;</sup> shrinks its loss. Right: what actually matters, the
+    <b>sum</b> over a whole image of anchors, split into the easy negatives and the few hard positives.</p>
+
+  <div class="lab-stage">
+    <div class="figrow">
+      <div>
+        <figure class="lab-fig"><figcaption id="cap-curve">one example</figcaption><div id="fig-curve"></div></figure>
+        <div class="under" id="c-curve"></div>
+      </div>
+      <div>
+        <figure class="lab-fig"><figcaption id="cap-pop">one image</figcaption><div id="fig-pop"></div></figure>
+        <div class="under" id="c-pop"></div>
+      </div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-main" class="lab-controls"></div>
+      <div class="formula" id="formula"></div>
+      <div class="readouts" id="readouts"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>With the defaults (100 000 easy negatives at <i>p<sub>t</sub></i> = 0.99, 20 positives at 0.3): under plain CE, what share of
+        the total loss do the easy negatives make, although each contributes only 0.01? Then compare the focal bar.
+        <details><summary>why</summary><p>100 000 x 0.01 = 1 005 against 20 x 1.2 = 24: about 98% of the loss, and of the gradient, says
+          "these negatives are negatives", which the network already knows. With &gamma; = 2 each easy negative is multiplied by
+          (1 - 0.99)<sup>2</sup> = 0.0001, and the 20 positives now carry about 97% of the loss.</p></details></li>
+      <li>Move the marker to <i>p<sub>t</sub></i> = 0.9 and read the factor. Is the "100x less" of the notebook the whole story?
+        <details><summary>why</summary><p>(1 - 0.9)<sup>2</sup> = 0.01 is the 100x. &alpha;<sub>t</sub> adds another factor: 0.25 for positives,
+          0.75 for negatives. Switch the example type to see both. With &gamma; = 0 the focal loss is just &alpha;-weighted CE.</p></details></li>
+      <li>Set the easy negatives' <i>p<sub>t</sub></i> to 0.9 instead of 0.99. Does &gamma; = 2 still rescue the positives? What would?
+        <details><summary>why</summary><p>No: 100 000 x 0.75 x 0.01 x 0.105 = 79 against 3 for the positives, still about 96% negatives.
+          The modulating factor only silences examples that are <i>already</i> very easy. Raising &gamma; helps, and so does fewer
+          negatives, which is why RetinaNet still matches anchors carefully (ignore zone between IoU 0.4 and 0.5).</p></details></li>
+      <li>Set the easy negatives to <i>p<sub>t</sub></i> = 0.5: this is a fresh network whose classification bias is 0. Now 0.99.
+        <details><summary>why</summary><p>At <i>p<sub>t</sub></i> = 0.5 every negative is a "hard" example; 100 000 of them swamp the positives
+          under any &gamma;, and the first updates push everything towards background. RetinaNet's bias init
+          b = -log((1 - &pi;)/&pi;), &pi; = 0.01 (section 4) starts every anchor at p = 0.01, so negatives start at <i>p<sub>t</sub></i> = 0.99,
+          exactly where &gamma; = 2 works.</p></details></li>
+      <li>Switch the bars to <b>gradient</b>. Is the picture different from the loss?
+        <details><summary>why</summary><p>The shares move a little but tell the same story. The gradient with respect to the logit is
+          |dFL/dx| = &alpha;<sub>t</sub>(1 - <i>p<sub>t</sub></i>)<sup>&gamma;</sup> ((1 - <i>p<sub>t</sub></i>) - &gamma; <i>p<sub>t</sub></i> log <i>p<sub>t</sub></i>);
+          for CE it is simply 1 - <i>p<sub>t</sub></i>. The gradient is what training actually follows.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  const S = Lab.params({ gamma: 2, alpha: 0.25, pt: 0.9, kind: "pos", logy: false, measure: "loss",
+                         n_easy: 100000, pt_easy: 0.99, n_hard: 20, pt_hard: 0.3 });
+  S.kind = S.kind === "neg" ? "neg" : "pos";
+  S.measure = S.measure === "grad" ? "grad" : "loss";
+
+  // ---- the maths (same as day2.sigmoid_focal_loss / torchvision.ops.sigmoid_focal_loss per element)
+  const alphaT = (kind) => (kind === "pos" ? S.alpha : 1 - S.alpha);
+  const ce = (pt) => -Math.log(pt);
+  const fl = (pt, g, a) => -a * Math.pow(1 - pt, g) * Math.log(pt);
+  const flGrad = (pt, g, a) => a * Math.pow(1 - pt, g) * ((1 - pt) - g * pt * Math.log(pt));   // |d FL / d logit|
+  function population() {
+    const per = S.measure === "grad"
+      ? { ceE: flGrad(S.pt_easy, 0, 1), ceH: flGrad(S.pt_hard, 0, 1), flE: flGrad(S.pt_easy, S.gamma, 1 - S.alpha), flH: flGrad(S.pt_hard, S.gamma, S.alpha) }
+      : { ceE: ce(S.pt_easy), ceH: ce(S.pt_hard), flE: fl(S.pt_easy, S.gamma, 1 - S.alpha), flH: fl(S.pt_hard, S.gamma, S.alpha) };
+    return { per, ce: [S.n_easy * per.ceE, S.n_hard * per.ceH], fl: [S.n_easy * per.flE, S.n_hard * per.flH] };
+  }
+
+  // ---- number formatting
+  const sig = (v) => {
+    if (v === 0) return "0";
+    const a = Math.abs(v);
+    if (a >= 10000) return Math.round(v).toLocaleString("en-US").replace(/,/g, " ");
+    if (a >= 100) return v.toFixed(1);
+    if (a >= 1) return v.toFixed(2);
+    if (a >= 0.001) return v.toPrecision(3);
+    return v.toExponential(2).replace("e-", "e-");
+  };
+  const count = (n) => Math.round(n).toLocaleString("en-US").replace(/,/g, " ");
+
+  // ---- controls
+  Lab.slider("#c-main", { label: "gamma (focusing)", min: 0, max: 5, step: 0.1, value: S.gamma, fmt: (v) => v.toFixed(1), onInput: (v) => { S.gamma = v; redraw(); } });
+  Lab.slider("#c-main", { label: "alpha (weight of positives)", min: 0, max: 1, step: 0.05, value: S.alpha, fmt: (v) => v.toFixed(2), onInput: (v) => { S.alpha = v; redraw(); } });
+  const ptCtl = Lab.slider("#c-curve", { label: "marker p_t", min: 0.01, max: 0.999, step: 0.001, value: S.pt, fmt: (v) => v.toFixed(3), onInput: (v) => { S.pt = v; redraw(); } });
+  Lab.segmented("#c-curve", { label: "the example is", options: [{ value: "pos", label: "positive" }, { value: "neg", label: "negative" }], value: S.kind, onChange: (v) => { S.kind = v; redraw(); } });
+  const logBox = Lab.el("div", { class: "wide" }); Lab.$("#c-curve").append(logBox);
+  Lab.toggle(logBox, { label: "log scale for the loss axis", value: S.logy, onChange: (v) => { S.logy = v; redraw(); } });
+  const logSlider = (parent, o) => {                                   // slider over log10(n)
+    const s = Lab.slider(parent, { label: o.label, min: 0, max: o.maxExp, step: 0.001, value: Math.log10(Math.max(1, o.value)), fmt: (v) => count(10 ** v),
+      onInput: (v) => o.onInput(Math.round(10 ** v)) });
+    return s;
+  };
+  logSlider("#c-pop", { label: "negatives", maxExp: 5, value: S.n_easy, onInput: (v) => { S.n_easy = v; redraw(); } });
+  Lab.slider("#c-pop", { label: "their p_t", min: 0.5, max: 0.999, step: 0.001, value: S.pt_easy, fmt: (v) => v.toFixed(3), onInput: (v) => { S.pt_easy = v; redraw(); } });
+  logSlider("#c-pop", { label: "positives", maxExp: 3, value: S.n_hard, onInput: (v) => { S.n_hard = v; redraw(); } });
+  Lab.slider("#c-pop", { label: "their p_t", min: 0.01, max: 0.95, step: 0.01, value: S.pt_hard, fmt: (v) => v.toFixed(2), onInput: (v) => { S.pt_hard = v; redraw(); } });
+  const mBox = Lab.el("div", { class: "wide" }); Lab.$("#c-pop").append(mBox);
+  Lab.segmented(mBox, { label: "bars show the sum of", options: [{ value: "loss", label: "loss" }, { value: "grad", label: "|gradient| wrt logit" }], value: S.measure, onChange: (v) => { S.measure = v; redraw(); } });
+
+  const rCE = Lab.readout("#readouts", "CE");
+  const rFac = Lab.readout("#readouts", "(1 - p_t)^γ");
+  const rFL = Lab.readout("#readouts", "FL");
+  const rRat = Lab.readout("#readouts", "CE ÷ FL");
+
+  // ---- left: loss curves with a draggable marker
+  const cc = Lab.canvas("#fig-curve", 430, 300);
+  let ax = null;
+  const setPt = (p) => { if (!ax) return; S.pt = Math.round(Lab.clamp(ax.ix(p.x), 0.01, 0.999) * 1000) / 1000; ptCtl.set(S.pt); redraw(); };
+  Lab.pointer(cc, { down: setPt, move: setPt, hover: () => { cc.canvas.style.cursor = "ew-resize"; } });
+
+  // ---- right: population bars
+  const cp = Lab.canvas("#fig-pop", 290, 300);
+
+  function draw() {
+    const cFL = Lab.color("--c1"), cCE = Lab.color("--c2"), ink = Lab.color("--ink"), muted = Lab.color("--muted");
+    const a = alphaT(S.kind);
+    const Y = S.logy ? (v) => Math.log10(Math.max(v, 1e-12)) : (v) => v;
+
+    // curves
+    const g = cc.ctx; cc.clear();
+    ax = Lab.axes(g, { x: 52, y: 10, w: 364, h: 236, xmin: 0, xmax: 1, ymin: S.logy ? -6 : 0, ymax: S.logy ? 1 : 5,
+      yticks: S.logy ? [-6, -5, -4, -3, -2, -1, 0, 1] : [0, 1, 2, 3, 4, 5],
+      yfmt: S.logy ? (v) => (v === 0 ? "1" : v === 1 ? "10" : `1e${v}`) : undefined,
+      xlabel: "p_t  (probability of the true label)", ylabel: S.logy ? "loss (log scale)" : "loss" });
+    const xs = []; for (let k = 0; k <= 600; k++) xs.push(0.001 + (0.9999 - 0.001) * (k / 600) ** 0.8);
+    ax.line(xs.map((p) => [p, Y(ce(p))]), cCE, 2);
+    ax.line(xs.map((p) => [p, Y(fl(p, S.gamma, a))]), cFL, 2.5);
+    // marker
+    const px = ax.sx(S.pt);
+    g.save(); g.strokeStyle = Lab.color("--ink-2"); g.setLineDash([4, 3]); g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(px, 10); g.lineTo(px, 246); g.stroke(); g.restore();
+    const vCE = ce(S.pt), vFL = fl(S.pt, S.gamma, a);
+    const inRange = (v) => { const y = Y(v); return y >= (S.logy ? -6 : 0) && y <= (S.logy ? 1 : 5); };
+    if (inRange(vCE)) ax.dot(S.pt, Y(vCE), cCE, 5);
+    if (inRange(vFL)) ax.dot(S.pt, Y(vFL), cFL, 5);
+    const lx = S.pt > 0.62 ? px - 8 : px + 8, al = S.pt > 0.62 ? "right" : "left";
+    Lab.text(g, `p_t = ${S.pt.toFixed(3)}`, lx, 26, { size: 12, weight: 650, color: ink, align: al });
+    Lab.text(g, `CE ${sig(vCE)}`, lx, 42, { size: 11.5, align: al });
+    Lab.text(g, `FL ${sig(vFL)}`, lx, 57, { size: 11.5, align: al });
+    Lab.$("#cap-curve").innerHTML = `one example <small>${S.kind === "pos" ? "positive (label 1)" : "negative (label 0)"}, &alpha;<sub>t</sub> = ${a.toFixed(2)} · drag the marker</small>`;
+
+    // population
+    const P = population();
+    const q = cp.ctx; cp.clear();
+    const top = 40, H = 196, bw = 76, xs2 = [46, 168];
+    const cEasy = Lab.color("--muted"), cHard = Lab.color("--c1");
+    const bars = [["CE", P.ce], [`focal (γ = ${S.gamma.toFixed(1)}, α = ${S.alpha.toFixed(2)})`, P.fl]];
+    bars.forEach(([name, [e, h]], k) => {
+      const x = xs2[k], tot = e + h, se = tot > 0 ? e / tot : 0;
+      const hE = H * se, hH = H - hE;
+      const segs = [[hH, cHard, 1 - se, top], [hE, cEasy, se, top + hH]];
+      for (const [hh, col, share, y0] of segs) {
+        if (hh <= 0) continue;
+        q.fillStyle = col; q.fillRect(x, y0, bw, hh);
+        if (hh >= 16) {
+          const rgb = Lab.rgb(col);
+          Lab.text(q, `${(100 * share).toFixed(1)}%`, x + bw / 2, y0 + hh / 2, { size: 12.5, weight: 700, align: "center", baseline: "middle", color: Lab.inkOn(rgb) });
+        } else {                                                     // thin slice: label it beside the bar
+          Lab.text(q, `${(100 * share).toFixed(1)}%`, x + bw + 4, Lab.clamp(y0 + hh / 2, top + 6, top + H - 6), { size: 11, weight: 650, baseline: "middle", color: ink });
+        }
+      }
+      q.strokeStyle = Lab.color("--border"); q.strokeRect(x + 0.5, top + 0.5, bw - 1, H - 1);
+      Lab.text(q, `Σ = ${sig(tot)}`, x + bw / 2, top - 8, { size: 12, weight: 650, color: ink, align: "center" });
+      Lab.text(q, k === 0 ? "CE" : "focal", x + bw / 2, top + H + 16, { size: 12.5, weight: 650, color: ink, align: "center" });
+      Lab.text(q, k === 0 ? "(γ = 0, no α)" : `γ = ${S.gamma.toFixed(1)}, α = ${S.alpha.toFixed(2)}`, x + bw / 2, top + H + 31, { size: 11, align: "center", color: muted });
+    });
+    const shareCE = 100 * P.ce[0] / (P.ce[0] + P.ce[1]), shareFL = 100 * P.fl[0] / (P.fl[0] + P.fl[1]);
+    Lab.text(q, S.measure === "grad" ? "sum of |dL/dx| per group" : "sum of the loss per group", 145, 14, { size: 11.5, align: "center", color: muted });
+    Lab.$("#cap-pop").innerHTML = `one image <small>easy negatives' share: CE ${shareCE.toFixed(1)}% -> focal ${shareFL.toFixed(1)}%</small>`;
+
+    // formula and readouts for the marker
+    const fac = Math.pow(1 - S.pt, S.gamma);
+    Lab.$("#formula").innerHTML =
+      `p_t = ${S.pt.toFixed(3)}, ${S.kind === "pos" ? "positive: α_t = α" : "negative: α_t = 1-α"} = ${a.toFixed(2)}\n` +
+      `CE = -log p_t = ${sig(vCE)}\n` +
+      `FL = -α_t (1 - p_t)^γ log p_t\n` +
+      `   = ${a.toFixed(2)} × ${(1 - S.pt).toFixed(3)}^${S.gamma.toFixed(1)} × ${sig(vCE)}\n` +
+      `   = ${a.toFixed(2)} × ${sig(fac)} × ${sig(vCE)}\n` +
+      `   = <b>${sig(vFL)}</b>\n\n` +
+      `per easy negative (p_t ${S.pt_easy.toFixed(3)}):\n  CE ${sig(P.per.ceE)}  focal ${sig(P.per.flE)}\n` +
+      `per hard positive (p_t ${S.pt_hard.toFixed(2)}):\n  CE ${sig(P.per.ceH)}  focal ${sig(P.per.flH)}` +
+      (S.measure === "grad" ? "\n  (|gradient| wrt the logit)" : "");
+    rCE.set(sig(vCE)); rFac.set(sig(fac)); rFL.set(sig(vFL));
+    rRat.set(vFL > 0 ? `${sig(vCE / vFL)}×` : "∞");
+    Lab.$("#legend").innerHTML =
+      `<span><i style="background:${cCE}"></i>CE = -log p_t</span><span><i style="background:${cFL}"></i>focal loss</span>` +
+      `<span><i style="background:${cEasy}"></i>${count(S.n_easy)} easy negatives</span><span><i style="background:${cHard}"></i>${count(S.n_hard)} hard positives</span>`;
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gradient flow: plain vs residual</title>
+<meta name="lab-notebook" content="D1-03">
+<meta name="lab-summary" content="A real forward and backward pass through a deep random ReLU network: per-layer gradient norms, plain vs identity skip connections, with or without BatchNorm, three initialisation scales.">
+<meta name="lab-height" content="900">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .under { margin-top: 10px; }
+  #formula { font-size: 11.5px; }
+  .readouts .readout { flex: 1 1 110px; }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Gradient flow: plain vs residual</h1><span class="lab-tag">D1-03 · section 4</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">The notebook's "gradient reaching the first layer" experiment, computed live with fully-connected layers
+    (width 32) instead of 3x3 convs: same units, initialisation, batch of 16 and loss. Plain and residual share the same weights.</p>
+
+  <div class="lab-stage">
+    <div>
+      <p class="lab-cap" id="cap-layers">gradient per layer</p>
+      <div id="fig-layers"></div>
+      <div class="legend" id="legend"></div>
+      <p class="lab-cap under" id="cap-depth">first layer</p>
+      <div id="fig-depth"></div>
+      <div class="formula under" id="formula"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-net" class="lab-controls"></div>
+      <p class="note" id="init-note"></p>
+      <div class="btn-row" id="c-btn"></div>
+      <div class="readouts" id="readouts"></div>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>PyTorch default init, no BN: slide the depth to 60. How much of the gradient reaches the plain net's first layer?
+        <details><summary>why</summary><p>Each plain block multiplies the backward signal by about 0.4 (the "gain / block" tile; theory 0.41), so
+          after 58 blocks the first layer gets ~10^-23 of it: it cannot learn. In the residual net the gradient also takes the path through every
+          "+ h": each block multiplies it by (I + dF/dh) instead of dF/dh, about 1.08, never close to 0.</p></details></li>
+      <li>Switch to <b>He</b> init (no BN). Does the plain net still lose its gradient? Does the residual net stay flat?
+        <details><summary>why</summary><p>He init sets Var(w) = 2/n so that n·Var(w)/2 = 1: the plain net now keeps its gradient on average
+          (that was the point of He et al. 2015). But the residual net explodes, x√2 per block: the identity and a full-size branch add up, so
+          the variance doubles at every block. Real ResNets therefore put BN in the branch and start its last BN at gamma = 0
+          (torchvision's zero_init_residual) so that every block starts close to the identity.</p></details></li>
+      <li>Back to the PyTorch default, turn <b>BatchNorm</b> on. Is the plain net fixed now?
+        <details><summary>why</summary><p>No: the gradient now explodes with depth (about x1.25 per layer here, x1.2 in the notebook's conv net),
+          like the notebook's right-hand panel. BN fixes the size of the forward signal, not the backward one (Yang et al. 2019). Residual + BN
+          stays nearly flat at any depth: that combination is what lets 152-layer ResNets train.</p></details></li>
+      <li>He init, plain, no BN, depth 60: press <b>resample weights</b> a few times. Same first-layer gradient each time?
+        <details><summary>why</summary><p>On average the gain is exactly 1, but a product of 58 random 32 x 32 matrices fluctuates a lot: over ten
+          draws the first-layer gradient varies by about 30x. Deep, narrow plain nets are unpredictable even with the right init. Now tick BatchNorm
+          and resample: the residual + BN net varies by less than 2x, because each of its blocks adds only a small correction to the identity path.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(() => {
+  // ==== maths (pure, no DOM): a deep fully-connected ReLU net, one forward + backward pass ====
+  const WIDTH = 32, N_IN = 32, N_CLS = 10, BATCH = 16, EPS = 1e-5;
+  const GAIN2 = { default: 1 / 3, he: 2, large: 4 };          // Var(w) = GAIN2 / fan_in
+  function uniformMatrix(seed, rows, cols) {                  // entries U(-1, 1), deterministic per (seed, layer)
+    const rnd = Lab.rng(seed), m = new Float64Array(rows * cols);
+    for (let i = 0; i < m.length; i++) m[i] = 2 * rnd() - 1;
+    return m;
+  }
+  /** Weights of layer l do not depend on the depth: deeper nets only add layers. */
+  function layerParams(seed, l, fin, fout, gain2) {
+    const s = 7919 * seed + 104729 * (l + 1);
+    const W = uniformMatrix(s, fout, fin), b = uniformMatrix(s + 1, 1, fout);
+    const a = Math.sqrt(3 * gain2 / fin), bb = 1 / Math.sqrt(fin);   // U(-a, a) has variance a²/3 = gain2 / fan_in
+    for (let i = 0; i < W.length; i++) W[i] *= a;
+    for (let i = 0; i < b.length; i++) b[i] *= bb;              // PyTorch default bias: U(-1/sqrt(fan_in), 1/sqrt(fan_in))
+    return { W, b, fin, fout };
+  }
+  function makeNet(depth, init, seed) {
+    const g = GAIN2[init] || GAIN2.default, L = [];
+    for (let l = 0; l < depth; l++) {
+      const head = l === depth - 1;
+      L.push(layerParams(seed, head ? 999 : l, l === 0 ? N_IN : WIDTH, head ? N_CLS : WIDTH, g));
+    }
+    return L;
+  }
+  function makeBatch() {                                       // fixed random input and labels
+    const rnd = Lab.rng(20241109), x = new Float64Array(BATCH * N_IN), y = new Int32Array(BATCH);
+    for (let i = 0; i < x.length; i += 2) {                     // Box-Muller: standard normal
+      const u = Math.max(1e-12, rnd()), v = rnd(), r = Math.sqrt(-2 * Math.log(u));
+      x[i] = r * Math.cos(2 * Math.PI * v); x[i + 1] = r * Math.sin(2 * Math.PI * v);
+    }
+    for (let i = 0; i < BATCH; i++) y[i] = Math.floor(rnd() * N_CLS);
+    return { x, y };
+  }
+  const matmulT = (X, W, B, fin, fout, bias) => {             // X (B x fin) W^T (fin x fout) + bias
+    const out = new Float64Array(B * fout);
+    for (let n = 0; n < B; n++) for (let o = 0; o < fout; o++) {
+      let s = bias ? bias[o] : 0;
+      for (let i = 0; i < fin; i++) s += X[n * fin + i] * W[o * fin + i];
+      out[n * fout + o] = s;
+    }
+    return out;
+  };
+  const matmul = (D, W, B, fin, fout) => {                    // D (B x fout) W (fout x fin)
+    const out = new Float64Array(B * fin);
+    for (let n = 0; n < B; n++) for (let o = 0; o < fout; o++) {
+      const d = D[n * fout + o]; if (d === 0) continue;
+      for (let i = 0; i < fin; i++) out[n * fin + i] += d * W[o * fin + i];
+    }
+    return out;
+  };
+  const gradW = (D, X, B, fin, fout) => {                     // D^T X, returns its Frobenius norm
+    let s = 0;
+    for (let o = 0; o < fout; o++) for (let i = 0; i < fin; i++) {
+      let g = 0; for (let n = 0; n < B; n++) g += D[n * fout + o] * X[n * fin + i];
+      s += g * g;
+    }
+    return Math.sqrt(s);
+  };
+  const norm = (v) => Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  function bnForward(Z, B, C) {                               // training-mode BatchNorm1d, gamma = 1, beta = 0
+    const xh = new Float64Array(B * C), inv = new Float64Array(C);
+    for (let c = 0; c < C; c++) {
+      let m = 0; for (let n = 0; n < B; n++) m += Z[n * C + c]; m /= B;
+      let v = 0; for (let n = 0; n < B; n++) v += (Z[n * C + c] - m) ** 2; v /= B;
+      inv[c] = 1 / Math.sqrt(v + EPS);
+      for (let n = 0; n < B; n++) xh[n * C + c] = (Z[n * C + c] - m) * inv[c];
+    }
+    return { xh, inv };
+  }
+  function bnBackward(dY, cache, B, C) {
+    const { xh, inv } = cache, dZ = new Float64Array(B * C);
+    for (let c = 0; c < C; c++) {
+      let s1 = 0, s2 = 0;
+      for (let n = 0; n < B; n++) { s1 += dY[n * C + c]; s2 += dY[n * C + c] * xh[n * C + c]; }
+      for (let n = 0; n < B; n++) dZ[n * C + c] = inv[c] * (dY[n * C + c] - s1 / B - xh[n * C + c] * s2 / B);
+    }
+    return dZ;
+  }
+  /** One forward + backward pass. Returns per-layer ||dL/dW||, ||dL/dh|| entering each block, and the loss. */
+  function run(net, data, residual, bn) {
+    const B = BATCH, C = WIDTH, depth = net.length, caches = [];
+    // stem
+    const z0 = matmulT(data.x, net[0].W, B, N_IN, C, net[0].b);
+    let h = z0.map((v) => Math.max(0, v));
+    caches.push({ z: z0 });
+    for (let l = 1; l < depth - 1; l++) {
+      const P = net[l], hin = h;
+      if (!residual) {                                        // h' = relu(BN(W h + b))
+        const z = matmulT(hin, P.W, B, C, C, bn ? null : P.b);
+        const bnc = bn ? bnForward(z, B, C) : null, zn = bn ? bnc.xh : z;
+        h = zn.map((v) => Math.max(0, v));
+        caches.push({ hin, zn, bnc });
+      } else {                                                // h' = h + W relu(BN(h)) + b   (pre-activation unit)
+        const bnc = bn ? bnForward(hin, B, C) : null, u = bn ? bnc.xh : hin;
+        const r = u.map((v) => Math.max(0, v));
+        const z = matmulT(r, P.W, B, C, C, bn ? null : P.b);
+        h = hin.map((v, i) => v + z[i]);
+        caches.push({ hin, u, r, bnc });
+      }
+    }
+    const H = net[depth - 1], logits = matmulT(h, H.W, B, C, N_CLS, H.b);
+    // softmax cross-entropy, mean over the batch
+    const dlog = new Float64Array(B * N_CLS); let loss = 0;
+    for (let n = 0; n < B; n++) {
+      let m = -Infinity; for (let k = 0; k < N_CLS; k++) m = Math.max(m, logits[n * N_CLS + k]);
+      let s = 0; for (let k = 0; k < N_CLS; k++) s += Math.exp(logits[n * N_CLS + k] - m);
+      for (let k = 0; k < N_CLS; k++) dlog[n * N_CLS + k] = Math.exp(logits[n * N_CLS + k] - m) / s / B;
+      dlog[n * N_CLS + data.y[n]] -= 1 / B;
+      loss += (m + Math.log(s) - logits[n * N_CLS + data.y[n]]) / B;
+    }
+    const gW = new Array(depth), dh = new Array(depth);       // dh[l] = ||dL/dh|| at the output of layer l
+    gW[depth - 1] = gradW(dlog, h, B, C, N_CLS);
+    let d = matmul(dlog, H.W, B, C, N_CLS);
+    for (let l = depth - 2; l >= 1; l--) {
+      dh[l] = norm(d);
+      const P = net[l], k = caches[l];
+      if (!residual) {
+        const dzn = d.map((v, i) => (k.zn[i] > 0 ? v : 0));
+        const dz = bn ? bnBackward(dzn, k.bnc, B, C) : dzn;
+        gW[l] = gradW(dz, k.hin, B, C, C);
+        d = matmul(dz, P.W, B, C, C);
+      } else {
+        gW[l] = gradW(d, k.r, B, C, C);
+        const dr = matmul(d, P.W, B, C, C);
+        const du = dr.map((v, i) => (k.u[i] > 0 ? v : 0));
+        const dbr = bn ? bnBackward(du, k.bnc, B, C) : du;
+        d = d.map((v, i) => v + dbr[i]);
+      }
+    }
+    dh[0] = norm(d);
+    const dz0 = d.map((v, i) => (caches[0].z[i] > 0 ? v : 0));
+    gW[0] = gradW(dz0, data.x, B, N_IN, C);
+    return { gW, dh, loss };
+  }
+  /** Geometric-mean factor by which one block multiplies ||dL/dh|| on the way back. */
+  const gainPerBlock = (r) => (r.dh.length > 2 ? Math.pow(r.dh[0] / r.dh[r.dh.length - 2], 1 / (r.dh.length - 2)) : NaN);
+  // ==== end maths ====
+
+  if (window.GF_TEST) { window.GF = { makeNet, makeBatch, run, gainPerBlock, layerParams }; return; }
+
+  const S = Lab.params({ depth: 40, init: "default", bn: false, seed: 1 });
+  S.depth = Lab.clamp(Math.round(S.depth), 2, 60);
+  if (!(S.init in GAIN2)) S.init = "default";
+  const DATA = makeBatch();
+  const DEPTHS = [4, 10, 20, 30, 40, 60];
+
+  // ---- controls
+  Lab.slider("#c-net", { label: "depth (weight layers)", min: 2, max: 60, step: 1, value: S.depth, onInput: (v) => { S.depth = v; redraw(); } });
+  Lab.segmented("#c-net", { label: "initialisation scale", value: S.init,
+    options: [{ value: "default", label: "PyTorch default" }, { value: "he", label: "He" }, { value: "large", label: "2x He" }],
+    onChange: (v) => { S.init = v; curve = null; redraw(); } });
+  Lab.toggle("#c-net", { label: "BatchNorm in every unit (batch of 16)", value: S.bn, onChange: (v) => { S.bn = v; curve = null; redraw(); } });
+  Lab.button("#c-btn", "Resample weights", () => { S.seed += 1; curve = null; redraw(); });
+  const rP = Lab.readout("#readouts", "first layer, plain");
+  const rR = Lab.readout("#readouts", "first layer, residual");
+  const rGP = Lab.readout("#readouts", "gain / block, plain");
+  const rGR = Lab.readout("#readouts", "gain / block, residual");
+
+  const cl = Lab.canvas("#fig-layers", 700, 226);
+  const cd = Lab.canvas("#fig-depth", 700, 184);
+  const COL = { plain: "--c2", res: "--c1" };
+  Lab.$("#legend").innerHTML = `<span><i style="background:${Lab.color(COL.res)}"></i>residual: h + F(h)</span>`
+    + `<span><i style="background:${Lab.color(COL.plain)}"></i>plain: F(h)</span>`;
+
+  // ---- helpers
+  const sci = (v) => {
+    if (!(v > 0)) return "0";
+    const e = Math.floor(Math.log10(v)), m = v / 10 ** e;
+    return e >= -2 && e <= 3 ? (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toPrecision(2)) : `${m.toFixed(1)}e${e}`;
+  };
+  const decade = (e) => (e === 0 ? "1" : e === 1 ? "10" : e === -1 ? "0.1" : `1e${e}`);
+  function logRange(vals) {
+    const ls = vals.filter((v) => v > 0).map(Math.log10);
+    let lo = Math.floor(Math.min(...ls)), hi = Math.ceil(Math.max(...ls));
+    if (hi - lo < 2) { lo -= 1; hi += 1; }
+    const span = hi - lo, step = span > 24 ? 6 : span > 12 ? 3 : span > 6 ? 2 : 1;
+    lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+    const ticks = []; for (let e = lo; e <= hi; e += step) ticks.push(e);
+    return { lo, hi, ticks };
+  }
+
+  let curve = null;                                           // first-layer gradient vs depth, mean of 3 weight draws
+  function depthCurve() {
+    if (curve) return curve;
+    curve = { plain: [], res: [] };
+    for (const d of DEPTHS) {
+      let p = 0, r = 0;
+      for (let s = 0; s < 3; s++) {
+        const net = makeNet(d, S.init, S.seed + s);
+        p += run(net, DATA, false, S.bn).gW[0] / 3; r += run(net, DATA, true, S.bn).gW[0] / 3;
+      }
+      curve.plain.push(p); curve.res.push(r);
+    }
+    return curve;
+  }
+
+  function draw() {
+    const net = makeNet(S.depth, S.init, S.seed);
+    const P = run(net, DATA, false, S.bn), R = run(net, DATA, true, S.bn);
+    const cp = Lab.color(COL.plain), cr = Lab.color(COL.res);
+
+    // per-layer gradient norms
+    const g = cl.ctx; cl.clear();
+    const yr = logRange([...P.gW, ...R.gW]);
+    const ax = Lab.axes(g, { x: 74, y: 8, w: 610, h: 176, xmin: 1, xmax: Math.max(2, S.depth), ymin: yr.lo, ymax: yr.hi,
+      yticks: yr.ticks, yfmt: decade, xlabel: "layer (1 = next to the input, " + S.depth + " = the classifier)", ylabel: "||dL/dW|| (log)",
+      xticks: S.depth <= 12 ? Array.from({ length: S.depth }, (_, i) => i + 1) : [1, ...Array.from({ length: Math.floor(S.depth / 10) }, (_, i) => 10 * (i + 1)).filter((v) => v < S.depth), S.depth] });
+    const pts = (r) => r.gW.map((v, i) => [i + 1, Math.log10(Math.max(v, 1e-300))]);
+    ax.line(pts(P), cp); ax.line(pts(R), cr);
+    ax.dot(1, Math.log10(P.gW[0]), cp); ax.dot(1, Math.log10(R.gW[0]), cr);
+    Lab.$("#cap-layers").innerHTML = `gradient per layer <small>||dL/dW|| of every weight layer after one backward pass, depth ${S.depth}, weight draw #${S.seed}</small>`;
+
+    // first layer: bars + the notebook's depth curve
+    const h = cd.ctx; cd.clear();
+    const cv = depthCurve();
+    const all = [...cv.plain, ...cv.res, P.gW[0], R.gW[0]];
+    const dr = logRange(all);
+    // (a) bars on a log axis
+    const bx = 70, bw = 150, sx = (v) => bx + (bw * (Math.log10(Math.max(v, 1e-300)) - dr.lo)) / (dr.hi - dr.lo);
+    Lab.text(h, `depth ${S.depth}, this draw`, 0, 12, { size: 11.5, weight: 600, color: Lab.color("--ink") });
+    [["residual", R.gW[0], cr], ["plain", P.gW[0], cp]].forEach(([name, v, c], i) => {
+      const y = 32 + i * 36;
+      Lab.text(h, name, 0, y + 12, { size: 11.5 });
+      h.fillStyle = c; h.fillRect(bx, y, Math.max(1, sx(v) - bx), 18);
+      Lab.text(h, sci(v), Math.min(sx(v), bx + bw) + 5, y + 13, { size: 11.5, weight: 650, color: Lab.color("--ink") });
+    });
+    h.save(); h.strokeStyle = Lab.color("--axis"); h.beginPath(); h.moveTo(bx + 0.5, 26); h.lineTo(bx + 0.5, 92); h.stroke(); h.restore();
+    const ratio = R.gW[0] / P.gW[0];
+    Lab.text(h, `residual / plain = ${sci(ratio)}`, 0, 124, { size: 11.5, color: Lab.color("--ink-2") });
+    Lab.text(h, `log axis from ${decade(dr.lo)} to ${decade(dr.hi)}`, 0, 142, { size: 10.5, color: Lab.color("--muted") });
+    // (b) mean first-layer gradient vs depth
+    const ax2 = Lab.axes(h, { x: 340, y: 22, w: 344, h: 122, xmin: 0, xmax: 62, ymin: dr.lo, ymax: dr.hi, yticks: dr.ticks, yfmt: decade,
+      xticks: DEPTHS, xlabel: "depth" });
+    Lab.text(h, "vs depth, mean of 3 draws = the notebook's figure", 300, 12, { size: 11.5, weight: 600, color: Lab.color("--ink") });
+    h.save(); h.strokeStyle = Lab.color("--ink-2"); h.setLineDash([4, 3]); h.lineWidth = 1.5;
+    h.beginPath(); h.moveTo(ax2.sx(S.depth), 22); h.lineTo(ax2.sx(S.depth), 144); h.stroke(); h.restore();
+    for (const [key, c] of [["plain", cp], ["res", cr]]) {
+      const p = DEPTHS.map((d, i) => [d, Math.log10(Math.max(cv[key][i], 1e-300))]);
+      ax2.line(p, c); p.forEach(([x, y]) => ax2.dot(x, y, c));
+    }
+    Lab.$("#cap-depth").innerHTML = `gradient at the first layer <small>||dL/dW_1||; dashed line = the depth on the slider</small>`;
+
+    // numbers
+    const gp = gainPerBlock(P), gr = gainPerBlock(R), nb = S.depth - 2;
+    rP.set(sci(P.gW[0]), P.gW[0] < 1e-6 ? "bad" : ""); rR.set(sci(R.gW[0]), R.gW[0] > 1e4 ? "bad" : "");
+    rGP.set(nb ? `x${gp.toFixed(2)}` : "-"); rGR.set(nb ? `x${gr.toFixed(2)}` : "-");
+    const v = GAIN2[S.init];
+    const th = (x) => Math.sqrt(x).toFixed(2);
+    Lab.$("#init-note").textContent = {
+      default: "Var(w) = 1/(3 fan_in): PyTorch's default for nn.Linear / nn.Conv2d, used by the notebook. Too small for ReLU.",
+      he: "Var(w) = 2/fan_in (He et al. 2015): keeps the signal size through a ReLU layer.",
+      large: "Var(w) = 4/fan_in: twice He's variance.",
+    }[S.init];
+    const lines = [
+      `backward through one block, δ = dL/dh (n = ${WIDTH}, Var(w) = ${S.init === "default" ? "1/(3n)" : S.init === "he" ? "2/n" : "4/n"}${S.bn ? ", with BN" : ""}):`,
+      `plain     δ_in = Wᵀ ${S.bn ? "BN′ᵀ" : "   "}(relu′ ⊙ δ_out)   <b>x${nb ? gp.toFixed(3) : "-"}</b> per block` +
+        (S.bn ? "" : `   theory ${th(v / 2)} = √(n·Var(w)/2)`),
+      `residual  δ_in = (I + ∂F/∂h)ᵀ δ_out     <b>x${nb ? gr.toFixed(3) : "-"}</b> per block` +
+        (S.bn ? "" : `   theory ${th(1 + v / 2)} = √(1 + n·Var(w)/2)`),
+      nb ? `after ${nb} blocks: plain ${gp.toFixed(3)}^${nb} = ${sci(gp ** nb)},  residual ${gr.toFixed(3)}^${nb} = ${sci(gr ** nb)}`
+        : "depth 2 = input layer + classifier only: plain and residual are the same network",
+    ];
+    Lab.$("#formula").innerHTML = lines.join("\n");
+  }
+  const redraw = Lab.loop(draw);
+})();
+</script>
+</body>
+</html>

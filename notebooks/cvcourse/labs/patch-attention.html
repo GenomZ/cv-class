@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patches and attention</title>
+<meta name="lab-notebook" content="D3-04">
+<meta name="lab-summary" content="Cut the photo into p x p patches (tokens), then click a patch: softmax(q.k / sqrt(d)) over all patches, temperature, position encoding, and shuffling the patches.">
+<meta name="lab-height" content="1000">
+<link rel="stylesheet" href="lab.css">
+<style>
+  .side { display: flex; flex-direction: column; gap: 8px; width: 290px; }
+  .under { margin-top: 10px; }
+  .readouts .readout { flex: 1 1 110px; }
+  .note b { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="lab">
+  <div class="lab-head">
+    <h1>Patches and attention</h1><span class="lab-tag">D3-04 · section 1</span>
+    <a class="lab-back" href="index.html">All labs</a>
+  </div>
+  <p class="lab-lede">A ViT cuts the image into p x p patches and treats them as a sequence of tokens. One attention layer then lets every
+    patch take a weighted average over <b>all</b> patches, with weights computed from their content. Click a patch to make it the query;
+    hover another to see its weight.</p>
+
+  <div class="lab-stage">
+    <div>
+      <div class="lab-figs">
+        <figure class="lab-fig"><figcaption id="cap-img">image</figcaption><div id="fig-img"></div></figure>
+        <div class="side">
+          <figure class="lab-fig"><figcaption id="cap-top">top 5</figcaption><div id="fig-top"></div></figure>
+          <figure class="lab-fig"><figcaption id="cap-emb">embeddings</figcaption><div id="fig-emb"></div></figure>
+        </div>
+      </div>
+      <p class="lab-cap under" id="cap-seq">the sequence</p>
+      <div id="fig-seq"></div>
+      <p class="lab-cap under" id="cap-tok">one patch = one token</p>
+      <div id="fig-tok"></div>
+    </div>
+    <div class="lab-controls">
+      <div id="c-main" class="lab-controls"></div>
+      <div class="readouts" id="readouts"></div>
+      <div class="formula" id="formula"></div>
+      <p class="note" id="note"></p>
+    </div>
+  </div>
+
+  <div class="try">
+    <h2>Try this - predict first, then check</h2>
+    <ol>
+      <li>Click a patch of the dark uniform. Will the patches that get its weight be its neighbours, or anywhere?
+        <details><summary>why</summary><p>Anywhere: the weights depend only on how similar the embeddings are, so dark patches in the
+          background get as much weight as the neighbours. One attention layer already reaches every patch (a global receptive field).
+          A 3 x 3 convolution sees 3 x 3 pixels per layer; stacked, its view grows by 2 pixels per layer, so it needs about 64 layers to
+          span this 128 px image.</p></details></li>
+      <li>Switch p from 16 to 8, then to 32. How many tokens, and how many attention weights per layer?
+        <details><summary>why</summary><p>N = (128 / p)^2: 256, 64 or 16 tokens (+1 [class]). The attention matrix has (N + 1)^2 entries per
+          head and layer: about 66 000 at p = 8 but only 289 at p = 32. Halving p quadruples N and multiplies the attention cost by 16;
+          that is why ViTs use 14-16 px patches and why Swin restricts attention to windows.</p></details></li>
+      <li>Turn on <b>shuffle the patches</b> (position strength 0). Do the query's weights change? Then try strength 2.
+        <details><summary>why</summary><p>With no position information they do not change at all (max |Δw| = 0): each patch keeps its weight,
+          it just moves with its patch. Attention is <b>permutation equivariant</b>: shuffle the tokens and the outputs are shuffled the same
+          way. Without position embeddings a ViT sees a bag of patches; adding them (the notebook shows the learned ones) is what lets it
+          know where a patch is.</p></details></li>
+      <li>Drag the temperature to 0.25, then to 4. Watch the top weight and the effective # of patches.
+        <details><summary>why</summary><p>Dividing the logits by T &lt; 1 sharpens the softmax towards the single most similar patch (the output
+          becomes a copy of it); T &gt; 1 flattens it towards a plain average of all patches. The 1/sqrt(d) in the formula is a fixed temperature
+          that keeps dot products of d-dimensional vectors from saturating the softmax.</p></details></li>
+      <li>Set the position strength to 3 and click a few queries. What changed, and why is it only a soft locality?
+        <details><summary>why</summary><p>The position term adds a bonus for nearby patches, so attention concentrates around the query but
+          similar patches far away can still win. A trained ViT learns such a bias in its early layers (local heads) and drops it in later ones.
+          Remember these embeddings are hand-made (colour, contrast, edges); a trained ViT learns what to attend to, see the notebook.</p></details></li>
+    </ol>
+  </div>
+</div>
+
+<script src="lab.js"></script>
+<script>
+(async () => {
+  const S = Lab.params({ p: 16, qx: 56, qy: 104, T: 1, pos: 0, shuffle: false, conv: false });
+  if (![8, 16, 32].includes(S.p)) S.p = 16;
+  const photo = await Lab.photo();
+  const IMG = photo.w, Z = 3, CV = IMG * Z;           // 128 px photo drawn at 3x
+  const FEATS = ["brightness", "red - green", "blue - yellow", "contrast", "horiz. edges", "vert. edges"];
+  const D = FEATS.length + 4;                         // 6 content numbers + 4 position numbers
+
+  const cimg = Lab.canvas("#fig-img", CV, CV, { framed: true });
+  const ctop = Lab.canvas("#fig-top", 290, 196);
+  const cemb = Lab.canvas("#fig-emb", 290, 152);
+  const cseq = Lab.canvas("#fig-seq", 690, 86);
+  const ctok = Lab.canvas("#fig-tok", 690, 120);
+
+  Lab.segmented("#c-main", { label: "patch size p", options: [8, 16, 32], value: S.p, onChange: (v) => { S.p = v; build(); redraw(); } });
+  const lt = Math.log2(Lab.clamp(S.T, 0.125, 8));
+  Lab.slider("#c-main", { label: "temperature T", min: -3, max: 3, step: 0.25, value: lt, fmt: (v) => (2 ** v).toFixed(2), onInput: (v) => { S.T = 2 ** v; redraw(); } });
+  Lab.slider("#c-main", { label: "position encoding strength", min: 0, max: 3, step: 0.25, value: S.pos, fmt: (v) => v.toFixed(2), onInput: (v) => { S.pos = v; redraw(); } });
+  Lab.toggle("#c-main", { label: "shuffle the patches", value: S.shuffle, onChange: (v) => { S.shuffle = v; redraw(); } });
+  Lab.toggle("#c-main", { label: "outline what one 3x3 conv sees", value: S.conv, onChange: (v) => { S.conv = v; redraw(); } });
+  const rN = Lab.readout("#readouts", "tokens N");
+  const rNN = Lab.readout("#readouts", "weights (N+1)²");
+  const rTop = Lab.readout("#readouts", "top weight");
+  const rEff = Lab.readout("#readouts", "effective # patches");
+  const rShuf = Lab.readout("#readouts", "max |Δw| after shuffle");
+
+  // ---------------------------------------------------------------- tokens: pixels, hand-made content features, permutation
+  let G, N, tok, perm, inv, hoverTok = -1;            // tok[t] = {r, c, pix (C, p, p) flattened, f (6 z-scored features)}
+  function build() {
+    const p = S.p; G = IMG / p; N = G * G; tok = [];
+    const raw = [];
+    for (let t = 0; t < N; t++) {
+      const r = Math.floor(t / G), c = t % G, pix = new Float64Array(3 * p * p);
+      let sg = 0, sg2 = 0, sr = 0, sgr = 0, sb = 0, dx = 0, dy = 0;
+      for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) {
+        const y = r * p + i, x = c * p + j, k = y * IMG + x;
+        for (let ch = 0; ch < 3; ch++) pix[ch * p * p + i * p + j] = photo.rgb[3 * k + ch];   // (C, p, p) order, as patchify
+        const g = photo.gray[k]; sg += g; sg2 += g * g;
+        sr += photo.rgb[3 * k]; sgr += photo.rgb[3 * k + 1]; sb += photo.rgb[3 * k + 2];
+        if (j < p - 1) dx += Math.abs(photo.gray[k + 1] - g);
+        if (i < p - 1) dy += Math.abs(photo.gray[k + IMG] - g);
+      }
+      const n = p * p, mg = sg / n, mr = sr / n, mgr = sgr / n, mb = sb / n;
+      raw.push([mg, mr - mgr, mb - (mr + mgr) / 2, Math.sqrt(Math.max(0, sg2 / n - mg * mg)), dy / (n - p), dx / (n - p)]);
+      tok.push({ r, c, pix });
+    }
+    for (let f = 0; f < FEATS.length; f++) {          // z-score every feature over the N patches
+      const col = raw.map((v) => v[f]), mu = col.reduce((a, b) => a + b, 0) / N;
+      const sd = Math.sqrt(col.reduce((a, b) => a + (b - mu) * (b - mu), 0) / N) || 1;
+      tok.forEach((t, i) => { (t.f = t.f || [])[f] = (raw[i][f] - mu) / sd; });
+    }
+    const rnd = Lab.rng(7); perm = Array.from({ length: N }, (_, i) => i);
+    for (let i = N - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [perm[i], perm[j]] = [perm[j], perm[i]]; }
+    inv = []; perm.forEach((s, t) => { inv[s] = t; });
+    hoverTok = -1;
+  }
+  build();
+  const slotOf = (t, shuffled) => (shuffled ? perm[t] : t);           // where token t sits (row-major slot)
+  const tokAt = (s) => (S.shuffle ? inv[s] : s);
+  function embed(t, shuffled) {                       // e_t = [content (6) | strength * 2-D sinusoidal position of its slot (4)]
+    const s = slotOf(t, shuffled), sr = Math.floor(s / G), sc = s % G, a = S.pos;
+    return [...tok[t].f, a * Math.sin((Math.PI * sr) / G), a * Math.cos((Math.PI * sr) / G), a * Math.sin((Math.PI * sc) / G), a * Math.cos((Math.PI * sc) / G)];
+  }
+  const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+  function attend(q, shuffled) {                      // weights of query token q over all tokens (indexed by token id)
+    const E = tok.map((_, t) => embed(t, shuffled)), eq = E[q];
+    const scores = E.map((e) => dot(eq, e)), logits = scores.map((s) => s / (Math.sqrt(D) * S.T));
+    const mx = Math.max(...logits), ex = logits.map((l) => Math.exp(l - mx)), Z0 = ex.reduce((a, b) => a + b, 0);
+    return { E, scores, logits, w: ex.map((v) => v / Z0) };
+  }
+  const qTok = () => Math.floor(Lab.clamp(S.qy, 0, IMG - 1) / S.p) * G + Math.floor(Lab.clamp(S.qx, 0, IMG - 1) / S.p);
+
+  // ---------------------------------------------------------------- pointer: click = query, hover = key
+  const slotAtPx = (pt) => Lab.clamp(Math.floor(pt.y / (S.p * Z)), 0, G - 1) * G + Lab.clamp(Math.floor(pt.x / (S.p * Z)), 0, G - 1);
+  const setQuery = (pt) => { const t = tokAt(slotAtPx(pt)); S.qx = tok[t].c * S.p + S.p / 2; S.qy = tok[t].r * S.p + S.p / 2; redraw(); };
+  Lab.pointer(cimg, { down: setQuery, move: setQuery, hover: (pt) => { hoverTok = tokAt(slotAtPx(pt)); redraw(); }, leave: () => { hoverTok = -1; redraw(); } });
+  cimg.canvas.style.cursor = "pointer";
+
+  // ---------------------------------------------------------------- drawing helpers
+  const slotXY = (s) => [(s % G) * S.p, Math.floor(s / G) * S.p];     // in image pixels
+  function drawPatch(ctx, t, x, y, w, h) {
+    ctx.save(); ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(photo.img, tok[t].c * S.p, tok[t].r * S.p, S.p, S.p, x, y, w, h); ctx.restore();
+  }
+  const f2 = (v) => v.toFixed(2), f3 = (v) => v.toFixed(3);
+
+  function draw() {
+    const p = S.p, q = qTok(), A = attend(q, S.shuffle), w = A.w;
+    const order = w.map((v, t) => t).sort((a, b) => w[b] - w[a]), top = order.slice(0, 5), wmax = w[order[0]];
+    const key = hoverTok >= 0 ? hoverTok : order[0] === q ? order[1] : order[0];
+    const hl = Lab.color("--hl"), ink = Lab.color("--ink"), ink2 = Lab.color("--ink-2"), c1 = Lab.color("--c1");
+
+    // image: patches at their (possibly shuffled) slots, dimmed by attention weight
+    const g = cimg.ctx; cimg.clear();
+    for (let s = 0; s < N; s++) { const [x, y] = slotXY(s); drawPatch(g, tokAt(s), x * Z, y * Z, p * Z, p * Z); }
+    g.save(); g.fillStyle = Lab.color("--surface");
+    for (let s = 0; s < N; s++) { const t = tokAt(s), [x, y] = slotXY(s); g.globalAlpha = 0.9 * (1 - Math.pow(w[t] / wmax, 0.75)); g.fillRect(x * Z, y * Z, p * Z, p * Z); }
+    g.restore();
+    g.save(); g.strokeStyle = Lab.alpha("--ink", 0.18); g.lineWidth = 1; g.beginPath();
+    for (let k = 1; k < G; k++) { g.moveTo(k * p * Z + 0.5, 0); g.lineTo(k * p * Z + 0.5, CV); g.moveTo(0, k * p * Z + 0.5); g.lineTo(CV, k * p * Z + 0.5); }
+    g.stroke(); g.restore();
+    top.forEach((t, i) => {
+      if (t === q) return;
+      const [x, y] = slotXY(slotOf(t, S.shuffle));
+      g.save(); g.strokeStyle = c1; g.lineWidth = 2; g.strokeRect(x * Z + 1, y * Z + 1, p * Z - 2, p * Z - 2);
+      g.fillStyle = c1; g.fillRect(x * Z + 1, y * Z + 1, 15, 15); g.restore();
+      Lab.text(g, String(i + 1), x * Z + 8.5, y * Z + 9.5, { size: 11, weight: 700, color: "#fff", align: "center", baseline: "middle" });
+    });
+    if (hoverTok >= 0 && hoverTok !== q) { const [x, y] = slotXY(slotOf(hoverTok, S.shuffle)); g.save(); g.strokeStyle = ink; g.setLineDash([4, 3]); g.lineWidth = 1.5; g.strokeRect(x * Z + 2, y * Z + 2, p * Z - 4, p * Z - 4); g.restore(); }
+    const [qx, qy] = slotXY(slotOf(q, S.shuffle));
+    g.save(); g.strokeStyle = hl; g.lineWidth = 3; g.strokeRect(qx * Z + 1.5, qy * Z + 1.5, p * Z - 3, p * Z - 3); g.restore();
+    if (S.conv) {
+      const cx = (qx + p / 2 - 1.5) * Z, cy = (qy + p / 2 - 1.5) * Z;
+      g.save(); g.fillStyle = hl; g.fillRect(cx, cy, 3 * Z, 3 * Z);
+      const lx = Math.min(cx + 3 * Z + 4, CV - 128), ly = cy + 3 * Z + 6 > CV - 18 ? cy - 22 : cy + 3 * Z + 6;
+      g.fillStyle = Lab.alpha("--surface", 0.92); g.fillRect(lx, ly, 124, 17); g.restore();
+      Lab.text(g, "← 3x3 conv: 9 pixels", lx + 4, ly + 9, { size: 11, weight: 700, color: ink, baseline: "middle" });
+    }
+    Lab.$("#cap-img").innerHTML = `${S.shuffle ? "shuffled patches" : "image"} <small>${IMG} x ${IMG} px, ${G} x ${G} patches of ${p} x ${p}; brighter = more weight</small>`;
+
+    // top 5 + output
+    const gt = ctop.ctx; ctop.clear();
+    const th = 26;
+    top.forEach((t, i) => {
+      const y = i * (th + 4);
+      drawPatch(gt, t, 0, y, th, th);
+      if (t === q) { gt.save(); gt.strokeStyle = hl; gt.lineWidth = 2; gt.strokeRect(1, y + 1, th - 2, th - 2); gt.restore(); }
+      Lab.text(gt, `${i + 1}. #${t}${t === q ? " (itself)" : ""}`, th + 6, y + th / 2, { size: 11.5, baseline: "middle", color: ink2 });
+      const bx = 128, bw = 116;
+      gt.fillStyle = Lab.color("--wash"); gt.fillRect(bx, y + 7, bw, th - 14);
+      gt.fillStyle = c1; gt.fillRect(bx, y + 7, bw * (w[t] / wmax), th - 14);
+      Lab.text(gt, f3(w[t]), bx + bw + 6, y + th / 2, { size: 11.5, baseline: "middle", mono: true, color: ink });
+    });
+    // output = sum_j w_j v_j, v_j = patch pixels
+    const out = new Float64Array(3 * p * p);
+    for (let t = 0; t < N; t++) { const v = tok[t].pix, wt = w[t]; for (let k = 0; k < out.length; k++) out[k] += wt * v[k]; }
+    const oy = 5 * (th + 4) + 6, os = 36;
+    Lab.text(gt, "query", 0, oy + 7, { size: 10.5, color: Lab.color("--muted") });
+    drawPatch(gt, q, 0, oy + 12, os, os);
+    Lab.text(gt, "→ output = Σ_j w_j v_j", os + 8, oy + 12 + os / 2, { size: 11.5, baseline: "middle", color: ink2 });
+    Lab.image(gt, Array.from({ length: p * p }, (_, k) => k), p, p, 160, oy + 12, os, os, (k) => [0, 1, 2].map((ch) => Math.round(255 * Lab.clamp(out[ch * p * p + k], 0, 1))));
+    const mean = [0, 1, 2].map((ch) => { let s = 0; for (let k = 0; k < p * p; k++) s += out[ch * p * p + k]; return Math.round((255 * s) / (p * p)); });
+    gt.fillStyle = `rgb(${mean})`; gt.fillRect(160 + os + 6, oy + 12, os, os);
+    Lab.text(gt, "mean", 160 + os + 6 + os / 2, oy + 7, { size: 10.5, align: "center", color: Lab.color("--muted") });
+    Lab.text(gt, "avg patch", 160 + os / 2, oy + 7, { size: 10.5, align: "center", color: Lab.color("--muted") });
+    Lab.$("#cap-top").innerHTML = `top 5 of ${N} weights <small>and the output for the query</small>`;
+
+    // embeddings of the query and of the key under the pointer (or the best other patch)
+    const ge = cemb.ctx; cemb.clear();
+    const eq = A.E[q], ek = A.E[key], names = [...FEATS, "pos sin r", "pos cos r", "pos sin c", "pos cos c"];
+    const rowH = 13.5, bw2 = 44, cq = 92 + bw2, ck = cq + 2 * bw2 + 12;     // bar centres (value 0) for query and key
+    names.forEach((nm, i) => {
+      const y = i * rowH + 12;
+      Lab.text(ge, nm, 0, y, { size: 10.5, color: i < FEATS.length ? ink2 : Lab.color("--muted") });
+      for (const [vec, xc, col] of [[eq, cq, hl], [ek, ck, c1]]) {
+        const v = Lab.clamp(vec[i] / 3, -1, 1);
+        ge.fillStyle = Lab.color("--axis"); ge.fillRect(xc - 0.5, y - 9.5, 1, rowH);
+        ge.fillStyle = col; ge.fillRect(v >= 0 ? xc : xc + v * bw2, y - 7.5, Math.abs(v) * bw2, rowH - 5);
+      }
+    });
+    Lab.$("#cap-emb").innerHTML = `embeddings e (d = ${D}) <small><span style="color:${hl}">■</span> query #${q} · <span style="color:${c1}">■</span> #${key}${hoverTok >= 0 ? " (pointer)" : " (best other)"}</small>`;
+
+    // the sequence: weights over the 1-D token order, with the patches underneath
+    const gs = cseq.ctx; cseq.clear();
+    const W = cseq.w, sw = W / N, bh = 44;
+    for (let s = 0; s < N; s++) {
+      const t = tokAt(s), x = s * sw;
+      gs.fillStyle = t === q ? hl : c1; const hgt = bh * (w[t] / wmax); gs.fillRect(x + (sw > 3 ? 0.5 : 0), bh - hgt, Math.max(sw - (sw > 3 ? 1 : 0), 0.8), hgt);
+      drawPatch(gs, t, x, bh + 4, sw, 18);
+    }
+    gs.save(); gs.strokeStyle = Lab.alpha("--ink", 0.35); gs.lineWidth = 1;
+    for (let r = 0; r <= G; r++) { const x = Math.round(r * G * sw) + 0.5; gs.beginPath(); gs.moveTo(x, bh + 2); gs.lineTo(x, bh + 26); gs.stroke(); }
+    gs.restore();
+    for (let r = 0; r < G; r += G > 8 ? 2 : 1) Lab.text(gs, `row ${r}`, (r + 0.5) * G * sw, bh + 36, { size: 10, align: "center", color: Lab.color("--muted") });
+    const qs = slotOf(q, S.shuffle), qxp = (qs + 0.5) * sw;
+    gs.fillStyle = hl; gs.beginPath(); gs.moveTo(qxp, bh + 24); gs.lineTo(qxp - 5, bh + 31); gs.lineTo(qxp + 5, bh + 31); gs.fill();
+    Lab.$("#cap-seq").innerHTML = `the sequence the transformer sees <small>[class] + ${N} tokens in ${S.shuffle ? "shuffled" : "row-major"} order; bars = the query's weights</small>`;
+
+    // part A: one patch -> flattened vector -> linear projection (= a p x p, stride-p convolution)
+    const gk = ctok.ctx; ctok.clear();
+    const pz = 72, n3 = 3 * p * p, pix = tok[q].pix;
+    drawPatch(gk, q, 0, 16, pz, pz);
+    Lab.text(gk, `patch #${q} (row ${tok[q].r}, col ${tok[q].c})`, 0, 10, { size: 11 });
+    const chs = [["R", [1, 0, 0]], ["G", [0, 1, 0]], ["B", [0, 0.45, 1]]];
+    chs.forEach(([nm, tint], ch) => {
+      const x = pz + 22 + ch * 46;
+      Lab.image(gk, Array.from({ length: p * p }, (_, k) => pix[ch * p * p + k]), p, p, x, 34, 40, 40, (v) => tint.map((c) => Math.round(255 * (0.12 + 0.88 * v * c + (1 - c) * 0.18 * v))));
+      Lab.text(gk, nm, x + 20, 28, { size: 10.5, align: "center", color: ink2 });
+    });
+    Lab.text(gk, "→", pz + 8, 54, { size: 15, align: "center", baseline: "middle" });
+    const vx = pz + 22 + 3 * 46 + 18, vw = 240;
+    Lab.text(gk, "→", vx - 10, 54, { size: 15, align: "center", baseline: "middle" });
+    Lab.text(gk, `x = flatten (C, p, p): ${n3} numbers`, vx, 28, { size: 11, color: ink2 });
+    Lab.image(gk, Array.from({ length: n3 }, (_, k) => k), n3, 1, vx, 34, vw, 22, (k) => { const ch = Math.floor(k / (p * p)), v = pix[k]; return chs[ch][1].map((c) => Math.round(255 * (0.12 + 0.88 * v * c + (1 - c) * 0.18 * v))); });
+    Lab.text(gk, `[${Array.from(pix.slice(0, 4), f2).join(", ")}, …, ${f2(pix[n3 - 1])}]`, vx, 70, { size: 10.5, mono: true, color: ink2 });
+    const zx = vx + vw + 16;
+    Lab.text(gk, "→ z = W x + b", zx, 40, { size: 12, weight: 600, color: ink });
+    Lab.text(gk, `W: D x ${n3}`, zx, 56, { size: 11, mono: true, color: ink2 });
+    Lab.text(gk, "z ∈ R^D, one token", zx, 72, { size: 11, color: ink2 });
+    Lab.text(gk, `Same numbers as Conv2d(3, D, kernel_size=${p}, stride=${p}) at this patch: the kernel windows never overlap, so a linear`, 0, 100, { size: 11, color: ink2 });
+    Lab.text(gk, `layer on the flattened patches IS that convolution, with W = conv.weight.reshape(D, ${n3}) (notebook Exercise 1).`, 0, 115, { size: 11, color: ink2 });
+    Lab.$("#cap-tok").innerHTML = `one patch = one token <small>part A: patchify + linear projection; ViT-B/16: p = 16, 768 numbers → D = 768</small>`;
+
+    // readouts
+    const unsh = attend(q, false).w, dmax = Math.max(...w.map((v, t) => Math.abs(v - unsh[t])));
+    rN.set(`${N} (+1)`); rNN.set(((N + 1) ** 2).toLocaleString("en-US"));
+    rTop.set(f3(wmax)); rEff.set((1 / w.reduce((a, b) => a + b * b, 0)).toFixed(1));
+    rShuf.set(S.shuffle ? (dmax < 1e-12 ? "0 (same)" : dmax.toFixed(4)) : "shuffle off", S.shuffle && dmax < 1e-12 ? "good" : "");
+
+    // formula for the key under the pointer
+    Lab.$("#formula").innerHTML =
+      `attention(q, k, v) =\n  softmax(q @ k.T / sqrt(d)) @ v\nhere q = k = e (d = ${D}), v = pixels\n\n` +
+      `k = #${key}${hoverTok >= 0 ? " (under the pointer)" : ""}\n` +
+      `e_q · e_k = ${f2(A.scores[key])}\n` +
+      `logit = ${f2(A.scores[key])} / (√${D} · ${S.T.toFixed(2)}) = ${f2(A.logits[key])}\n` +
+      `w_k = exp(${f2(A.logits[key])}) / Σ_j exp(logit_j)\n    = <b>${f3(w[key])}</b>   (j: all ${N} patches)`;
+    Lab.$("#note").innerHTML = `<b>Hand-made embeddings</b>: 6 content numbers (colour, contrast, edges; z-scored) + 4 position numbers. A trained ViT learns W_q, W_k, W_v and what to attend to; the notebook shows a real attention map.`;
+  }
+  const redraw = Lab.loop(draw);
+
+  // numbers behind the current state, for the cross-check against cvcourse.day3.attention / patchify
+  window.labExport = () => { const q = qTok(), A = attend(q, S.shuffle), out = new Array(3 * S.p * S.p).fill(0);
+    for (let t = 0; t < N; t++) tok[t].pix.forEach((v, k) => { out[k] += A.w[t] * v; });
+    return { p: S.p, T: S.T, pos: S.pos, shuffle: S.shuffle, q, perm, E: A.E, w: A.w, unshuffled_w: attend(q, false).w, out, rgb: Array.from(photo.rgb), qpix: Array.from(tok[q].pix) }; };
+})();
+</script>
+</body>
+</html>

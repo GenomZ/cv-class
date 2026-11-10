@@ -5,3 +5,5 @@ notebooks/solutions/_executed/
 .ipynb_checkpoints/
 *.pt
 *.onnx
+
+notebooks/cvcourse/labs/_shots/
