@@ -12,7 +12,10 @@ window.Lab = (() => {
     if (!b) { b = document.createElement("div"); b.className = "lab-error"; (document.body || document.documentElement).appendChild(b); }
     b.textContent += (b.textContent ? "\n" : "") + "Lab error: " + msg;
   }
-  window.addEventListener("error", (e) => banner(`${e.message} (line ${e.lineno})`));
+  window.addEventListener("error", (e) => {
+    if (/ResizeObserver loop/.test(e.message || "")) return;   // a browser notice about layout timing, not a script error
+    banner(`${e.message} (line ${e.lineno})`);
+  });
   window.addEventListener("unhandledrejection", (e) => banner(String(e.reason)));
 
   const embedded = window.self !== window.top;
@@ -20,7 +23,9 @@ window.Lab = (() => {
     // Inside a notebook the lab lives in a same-origin srcdoc iframe: grow it to fit the content.
     try {
       const f = window.frameElement;
-      if (f) f.style.height = Math.ceil(document.body.offsetHeight) + 2 + "px";
+      if (!f || f.closest(".lab-embed")) return;   // a lecture slide gives the lab a fixed box: scroll inside it
+      const h = Math.ceil(document.body.offsetHeight) + 2 + "px";
+      if (f.style.height !== h) f.style.height = h;
     } catch (_) { /* cross-origin host: keep the height given by labs.show() */ }
   }
   // Theme: #theme=light|dark (or labs.show(name, theme="dark")) wins; otherwise follow the notebook host

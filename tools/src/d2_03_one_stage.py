@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D2-03-one-stage"
 
@@ -48,6 +48,7 @@ CELLS = [
     md(r"""
     ## 0 · Setup
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", brief=True),
     code(SETUP),
 
     # ------------------------------------------------------------------ 1
@@ -87,14 +88,22 @@ CELLS = [
     The responsible cell is `(row, col) = (int(cy // cell), int(cx // cell))`.
     These are exactly the 8 numbers per object in the table under the lab.
     """),
+    api("np.zeros", brief=True),
     exercise(
         stub=r"""
         def grid_targets(bxs, labels, grid=8, size=128, num_classes=3):
+            '''bxs (N, 4) xyxy in pixels, labels (N,) class indices -> T (grid, grid, 5 + num_classes) float32,
+            indexed [row, col, channel]: 0 objectness, 1-4 (cx, cy, w, h) / size, then a one-hot class.'''
             T = np.zeros((grid, grid, 5 + num_classes), np.float32)
-            cell = size / grid
-            for b, l in zip(bxs, labels):
-                cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
-                # YOUR CODE HERE: responsible cell, then fill objectness, normalised box, one-hot class
+            cell = size / grid                               # side of one cell in pixels (16 for 128 / 8)
+            for box, label in zip(bxs, labels):
+                # 1. the centre of the box, in pixels
+                cx = (box[0] + box[2]) / 2
+                cy = (box[1] + box[3]) / 2
+                # 2. YOUR CODE: the responsible cell: row i = int(cy // cell), column j = int(cx // cell)
+                # 3. YOUR CODE: objectness: channel 0 of that cell is 1
+                # 4. YOUR CODE: w and h of the box; channels 1-4 of the cell get [cx, cy, w, h], each divided by size
+                # 5. YOUR CODE: the one-hot class: channel 5 + int(label) of the cell is 1
                 raise NotImplementedError
             return T
 
@@ -102,18 +111,31 @@ CELLS = [
         """,
         solution=r"""
         def grid_targets(bxs, labels, grid=8, size=128, num_classes=3):
+            '''bxs (N, 4) xyxy in pixels, labels (N,) class indices -> T (grid, grid, 5 + num_classes) float32,
+            indexed [row, col, channel]: 0 objectness, 1-4 (cx, cy, w, h) / size, then a one-hot class.'''
             T = np.zeros((grid, grid, 5 + num_classes), np.float32)
-            cell = size / grid
-            for b, l in zip(bxs, labels):
-                cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
-                i, j = int(cy // cell), int(cx // cell)
+            cell = size / grid                               # side of one cell in pixels (16 for 128 / 8)
+            for box, label in zip(bxs, labels):
+                # 1. the centre of the box, in pixels
+                cx = (box[0] + box[2]) / 2
+                cy = (box[1] + box[3]) / 2
+                # 2. the responsible cell
+                i = int(cy // cell)                          # row
+                j = int(cx // cell)                          # column
+                # 3. objectness
                 T[i, j, 0] = 1
-                T[i, j, 1:5] = [cx / size, cy / size, (b[2] - b[0]) / size, (b[3] - b[1]) / size]
-                T[i, j, 5 + int(l)] = 1
+                # 4. the box, normalised by the image size
+                w = box[2] - box[0]
+                h = box[3] - box[1]
+                T[i, j, 1:5] = [cx / size, cy / size, w / size, h / size]
+                # 5. the one-hot class
+                T[i, j, 5 + int(label)] = 1
             return T
 
         tests.check_grid_targets(grid_targets)
         """),
+    api("np.ndenumerate"),
+    api("np.random.default_rng", brief=True),
     code(r"""
     g_img, g_boxes, g_labels, _ = shapes.make_sample(np.random.default_rng(7), 128)
     T = shapes.grid_targets(g_boxes, g_labels, 8, 128, 3)
@@ -158,6 +180,7 @@ CELLS = [
     output already lives in the same layout as the target. Channel 0 and the class channels stay
     logits for numerically stable losses.
     """),
+    api("torchkit.summarize", brief=True),
     code(r"""
     print(torchkit.summarize(day2.MiniDetector(), (3, 128, 128)))
     """),
@@ -174,11 +197,35 @@ CELLS = [
     Tip: `pred[:, 1:5].permute(0, 2, 3, 1)[pos]` gives a `(P, 4)` tensor of the positive cells.
     Guard the case "no object in the batch" (box and class loss = 0, not NaN).
     """),
+    api("F.binary_cross_entropy_with_logits", title="Functions you will need"),
+    api("F.cross_entropy", "Tensor.permute", "Tensor.any", "Tensor.abs", "Tensor.sum", "Tensor.mean", "Tensor.argmax",
+        brief=True),
     exercise(
         stub=r"""
         def dense_loss(pred, target, w_obj=1.0, w_box=5.0, w_cls=1.0):
-            pos = target[:, 0] > 0.5                                  # (N, G, G) responsible cells
-            # YOUR CODE HERE
+            '''pred, target: (N, 5 + C, G, G); channel 0 objectness, 1-4 the box, 5.. the classes
+            (pred holds logits for objectness and classes, target a 0/1 objectness and a one-hot class)
+            -> (total, {"obj": l_obj, "box": l_box, "cls": l_cls}).'''
+            # 1. the responsible cells
+            pos = target[:, 0] > 0.5                                  # (N, G, G) True / False
+            # 2. YOUR CODE: l_obj, F.binary_cross_entropy_with_logits of pred[:, 0] against target[:, 0] (all cells)
+            if pos.any():
+                # 3. YOUR CODE: pred_box, pred[:, 1:5] with the channels moved last (.permute(0, 2, 3, 1))
+                #               -> (N, G, G, 4); then pred_box[pos] keeps the positive cells -> (P, 4)
+                # YOUR CODE: target_box, the same for target[:, 1:5] -> (P, 4)
+                # YOUR CODE: abs_err = |pred_box - target_box| -> (P, 4)
+                # YOUR CODE: l1_per_cell, abs_err summed over the 4 numbers (.sum(-1)) -> (P,)
+                # YOUR CODE: l_box, the mean of l1_per_cell over the positive cells
+                # 4. YOUR CODE: logits, pred[:, 5:] channels last, positive cells only -> (P, C)
+                # YOUR CODE: target_onehot, target[:, 5:] channels last, positive cells only -> (P, C)
+                # YOUR CODE: target_class, the class index of every positive cell: target_onehot.argmax(-1) -> (P,)
+                # YOUR CODE: l_cls = F.cross_entropy(logits, target_class)
+                raise NotImplementedError
+            else:
+                # no object in the batch: box and class loss 0, not NaN (pred.sum() * 0.0 is a 0 that is still a tensor)
+                l_box = pred.sum() * 0.0
+                l_cls = pred.sum() * 0.0
+            # 5. YOUR CODE: total = w_obj * l_obj + w_box * l_box + w_cls * l_cls
             raise NotImplementedError
             return total, {"obj": l_obj, "box": l_box, "cls": l_cls}
 
@@ -186,16 +233,34 @@ CELLS = [
         """,
         solution=r"""
         def dense_loss(pred, target, w_obj=1.0, w_box=5.0, w_cls=1.0):
-            pos = target[:, 0] > 0.5                                  # (N, G, G) responsible cells
+            '''pred, target: (N, 5 + C, G, G); channel 0 objectness, 1-4 the box, 5.. the classes
+            (pred holds logits for objectness and classes, target a 0/1 objectness and a one-hot class)
+            -> (total, {"obj": l_obj, "box": l_box, "cls": l_cls}).'''
+            # 1. the responsible cells
+            pos = target[:, 0] > 0.5                                  # (N, G, G) True / False
+            # 2. objectness: binary cross-entropy on every cell
             l_obj = F.binary_cross_entropy_with_logits(pred[:, 0], target[:, 0])
             if pos.any():
-                pb = pred[:, 1:5].permute(0, 2, 3, 1)[pos]            # (P, 4)
-                tb = target[:, 1:5].permute(0, 2, 3, 1)[pos]
-                l_box = (pb - tb).abs().sum(-1).mean()
-                logits = pred[:, 5:].permute(0, 2, 3, 1)[pos]         # (P, C)
-                l_cls = F.cross_entropy(logits, target[:, 5:].permute(0, 2, 3, 1)[pos].argmax(-1))
+                # 3. box: channels last, so that [pos] picks one row of 4 numbers per positive cell
+                pred_box = pred[:, 1:5].permute(0, 2, 3, 1)           # (N, G, G, 4)
+                pred_box = pred_box[pos]                              # (P, 4), P = number of positive cells
+                target_box = target[:, 1:5].permute(0, 2, 3, 1)       # (N, G, G, 4)
+                target_box = target_box[pos]                          # (P, 4)
+                abs_err = (pred_box - target_box).abs()               # (P, 4)
+                l1_per_cell = abs_err.sum(-1)                         # (P,) summed over the 4 numbers
+                l_box = l1_per_cell.mean()                            # mean over the positive cells
+                # 4. class: cross-entropy on the positive cells
+                logits = pred[:, 5:].permute(0, 2, 3, 1)              # (N, G, G, C)
+                logits = logits[pos]                                  # (P, C)
+                target_onehot = target[:, 5:].permute(0, 2, 3, 1)     # (N, G, G, C)
+                target_onehot = target_onehot[pos]                    # (P, C)
+                target_class = target_onehot.argmax(-1)               # (P,) class index of every positive cell
+                l_cls = F.cross_entropy(logits, target_class)
             else:
-                l_box = l_cls = pred.sum() * 0.0
+                # no object in the batch: box and class loss 0, not NaN (pred.sum() * 0.0 is a 0 that is still a tensor)
+                l_box = pred.sum() * 0.0
+                l_cls = pred.sum() * 0.0
+            # 5. the weighted sum
             total = w_obj * l_obj + w_box * l_box + w_cls * l_cls
             return total, {"obj": l_obj, "box": l_box, "cls": l_cls}
 
@@ -245,33 +310,58 @@ CELLS = [
     `size`, convert to xyxy), its score is the objectness, its label the argmax of the class part.
     `day2.decode_predictions` then multiplies score by class probability and runs class-wise NMS.
     """),
+    api("np.array", "Tensor.reshape", "np.argmax", "np.arange", "Tensor.round", brief=True),
     exercise(
         stub=r"""
         def decode_grid(T, size=128, score_threshold=0.5):
-            bxs, scores, labels = [], [], []
+            '''T (G, G, 5 + C): channel 0 objectness, 1-4 (cx, cy, w, h) / size, 5.. class probabilities ->
+            (boxes (K, 4) xyxy in pixels, scores (K,), labels (K,)): one box per cell with objectness >= score_threshold.'''
+            bxs = []
+            scores = []
+            labels = []
             G = T.shape[0]
-            for i in range(G):
-                for j in range(G):
-                    p = T[i, j]
-                    # YOUR CODE HERE
+            for i in range(G):                               # row
+                for j in range(G):                           # column
+                    p = T[i, j]                              # (5 + C,) the numbers of this cell
+                    # 1. YOUR CODE: skip this cell (continue) when its objectness p[0] is below score_threshold
+                    # 2. YOUR CODE: cx, cy, w, h: p[1], p[2], p[3], p[4], each times size (normalised -> pixels)
+                    # 3. YOUR CODE: append the xyxy box [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2] to bxs
+                    # 4. YOUR CODE: append the score float(p[0]) to scores
+                    # 5. YOUR CODE: append the label, the index of the largest class probability
+                    #               (int(np.argmax(p[5:]))), to labels
                     raise NotImplementedError
-            return np.array(bxs).reshape(-1, 4), np.array(scores), np.array(labels, int)
+            bxs = np.array(bxs).reshape(-1, 4)               # (K, 4); (0, 4) when no cell passed
+            return bxs, np.array(scores), np.array(labels, int)
 
         tests.check_decode_grid(decode_grid)
         """,
         solution=r"""
         def decode_grid(T, size=128, score_threshold=0.5):
-            bxs, scores, labels = [], [], []
+            '''T (G, G, 5 + C): channel 0 objectness, 1-4 (cx, cy, w, h) / size, 5.. class probabilities ->
+            (boxes (K, 4) xyxy in pixels, scores (K,), labels (K,)): one box per cell with objectness >= score_threshold.'''
+            bxs = []
+            scores = []
+            labels = []
             G = T.shape[0]
-            for i in range(G):
-                for j in range(G):
-                    p = T[i, j]
+            for i in range(G):                               # row
+                for j in range(G):                           # column
+                    p = T[i, j]                              # (5 + C,) the numbers of this cell
+                    # 1. skip the cells without an object
                     if p[0] < score_threshold:
                         continue
-                    cx, cy, w, h = p[1:5] * size
+                    # 2. the box in pixels
+                    cx = p[1] * size
+                    cy = p[2] * size
+                    w = p[3] * size
+                    h = p[4] * size
+                    # 3. as xyxy
                     bxs.append([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2])
-                    scores.append(float(p[0])); labels.append(int(np.argmax(p[5:])))
-            return np.array(bxs).reshape(-1, 4), np.array(scores), np.array(labels, int)
+                    # 4. the score
+                    scores.append(float(p[0]))
+                    # 5. the label: the class with the largest probability
+                    labels.append(int(np.argmax(p[5:])))
+            bxs = np.array(bxs).reshape(-1, 4)               # (K, 4); (0, 4) when no cell passed
+            return bxs, np.array(scores), np.array(labels, int)
 
         tests.check_decode_grid(decode_grid)
         """),
@@ -319,6 +409,7 @@ CELLS = [
     fine maps (stride 8) handle small objects, coarse maps (stride 64+) large ones, each with a few
     "default boxes" (SSD's name for anchors) whose scale grows with depth.
     """),
+    api("torchkit.get_pet_datasets", "np.asarray", "np.linspace", "np.sqrt", brief=True),
     code(r"""
     from PIL import Image
     pet_train, pet_val, _ = torchkit.get_pet_datasets(target="detection")
@@ -404,39 +495,78 @@ CELLS = [
     Every $P_i$ has `out_channels` channels and the height and width of its $C_i$: the shapes of the
     lab's pathway view.
     """),
+    api("nn.ModuleList", title="Functions you will need"),
+    api("nn.Conv2d", "F.interpolate", brief=True),
     exercise(
         stub=r"""
         class FPN(nn.Module):
+            '''FPN(in_channels_list, d): forward([C3, C4, C5], finest first, C_i of shape (N, c_i, H_i, W_i))
+            -> [P3, P4, P5]: P_i of shape (N, d, H_i, W_i).'''
             def __init__(self, in_channels_list, out_channels=256):
                 super().__init__()
-                # YOUR CODE HERE
+                # 1. one lateral 1x1 conv per level, c_i channels -> out_channels
+                self.lateral = nn.ModuleList()                   # a list of layers that PyTorch knows about
+                for c in in_channels_list:
+                    # YOUR CODE: append nn.Conv2d(c, out_channels, 1) to self.lateral
+                    raise NotImplementedError
+                # 2. one smoothing 3x3 conv per level, out_channels -> out_channels (padding 1 keeps the size)
+                self.smooth = nn.ModuleList()
+                # YOUR CODE: a loop over the levels (for level in range(len(in_channels_list))) that appends
+                #            one such conv per level to self.smooth
                 raise NotImplementedError
 
             def forward(self, feats):
-                # YOUR CODE HERE: laterals, then from the coarsest level down: merge and smooth
-                raise NotImplementedError
+                # 3. YOUR CODE: lat, a list: the lateral conv of every level applied to its feature map,
+                #               lat[i] = self.lateral[i](feats[i]) -> (N, d, H_i, W_i)
+                outs = [None] * len(feats)                       # P3, P4, P5, filled from the coarsest level down
+                # 4. YOUR CODE: the coarsest level: top = lat[-1]; outs[-1] = self.smooth[-1](top)
+                # 5. top-down: from the second-coarsest level to the finest
+                for i in range(len(feats) - 2, -1, -1):          # i = len - 2, ..., 1, 0
+                    # YOUR CODE: upsampled, top enlarged to the size of lat[i]:
+                    #            F.interpolate(top, size=lat[i].shape[-2:], mode="nearest") -> (N, d, H_i, W_i)
+                    # YOUR CODE: top = lat[i] + upsampled (the merge)
+                    # YOUR CODE: outs[i] = self.smooth[i](top)
+                    raise NotImplementedError
+                return outs
 
         tests.check_fpn_shapes(FPN)
         """,
         solution=r"""
         class FPN(nn.Module):
+            '''FPN(in_channels_list, d): forward([C3, C4, C5], finest first, C_i of shape (N, c_i, H_i, W_i))
+            -> [P3, P4, P5]: P_i of shape (N, d, H_i, W_i).'''
             def __init__(self, in_channels_list, out_channels=256):
                 super().__init__()
-                self.lateral = nn.ModuleList([nn.Conv2d(c, out_channels, 1) for c in in_channels_list])
-                self.smooth = nn.ModuleList([nn.Conv2d(out_channels, out_channels, 3, padding=1) for _ in in_channels_list])
+                # 1. one lateral 1x1 conv per level, c_i channels -> out_channels
+                self.lateral = nn.ModuleList()                   # a list of layers that PyTorch knows about
+                for c in in_channels_list:
+                    self.lateral.append(nn.Conv2d(c, out_channels, 1))
+                # 2. one smoothing 3x3 conv per level, out_channels -> out_channels (padding 1 keeps the size)
+                self.smooth = nn.ModuleList()
+                for level in range(len(in_channels_list)):
+                    self.smooth.append(nn.Conv2d(out_channels, out_channels, 3, padding=1))
 
             def forward(self, feats):
-                lat = [l(f) for l, f in zip(self.lateral, feats)]
-                outs = [None] * len(lat)
+                # 3. lat: the lateral conv of every level applied to its feature map
+                lat = []
+                for i in range(len(feats)):
+                    lat.append(self.lateral[i](feats[i]))        # (N, d, H_i, W_i)
+                outs = [None] * len(feats)                       # P3, P4, P5, filled from the coarsest level down
+                # 4. the coarsest level: only smoothed
                 top = lat[-1]
                 outs[-1] = self.smooth[-1](top)
-                for i in range(len(lat) - 2, -1, -1):
-                    top = lat[i] + F.interpolate(top, size=lat[i].shape[-2:], mode="nearest")
-                    outs[i] = self.smooth[i](top)
+                # 5. top-down: from the second-coarsest level to the finest
+                for i in range(len(feats) - 2, -1, -1):          # i = len - 2, ..., 1, 0
+                    upsampled = F.interpolate(top, size=lat[i].shape[-2:], mode="nearest")   # (N, d, H_i, W_i)
+                    top = lat[i] + upsampled                     # the merge
+                    outs[i] = self.smooth[i](top)                # (N, d, H_i, W_i)
                 return outs
 
         tests.check_fpn_shapes(FPN)
         """),
+    api("torchvision.models.feature_extraction.create_feature_extractor"),
+    api("torchvision.models.resnet18", "Module.eval", "torch.no_grad", "torch.randn", "torchkit.count_parameters",
+        brief=True),
     code(r"""
     # Your FPN on top of a pretrained ResNet-18: the shapes of the figure above
     from torchvision.models.feature_extraction import create_feature_extractor
@@ -457,6 +587,8 @@ CELLS = [
     channels are shown as RGB: $P_3$ has fine detail (fur, edges, eyes), $P_5$ is coarse but each
     of its cells summarises a whole head or body.
     """),
+    api("torchvision.models.detection.retinanet_resnet50_fpn", "np.linalg.svd"),
+    api("torch.tensor", "Tensor.numpy", "Tensor.min", "Tensor.max", brief=True),
     code(r"""
     from torchvision.models.detection import retinanet_resnet50_fpn, RetinaNet_ResNet50_FPN_Weights
     retina = retinanet_resnet50_fpn(weights=RetinaNet_ResNet50_FPN_Weights.DEFAULT).eval()
@@ -503,48 +635,93 @@ CELLS = [
     return `(list of class maps, list of box maps)`: for an input level `(N, 256, H, W)` the class map
     is `(N, A * C, H, W)` and the box map `(N, A * 4, H, W)`, one entry per level.
     """),
+    api("nn.init.constant_", title="Functions you will need"),
+    api("nn.Sequential", "nn.ReLU", "torch.zeros", "torch.sigmoid", brief=True),
     exercise(
         stub=r"""
         import math
         class RetinaHead(nn.Module):
+            '''RetinaHead(C_in, A, K): forward(list of feature maps (N, C_in, H, W), one per level) ->
+            (list of class maps (N, A * K, H, W), list of box maps (N, A * 4, H, W)); the same weights on every level.'''
             def __init__(self, in_channels, num_anchors, num_classes, num_convs=4, prior=0.01):
                 super().__init__()
-                # YOUR CODE HERE
+                # 1. the classification tower: num_convs times (3x3 conv in_channels -> in_channels, padding 1, then ReLU)
+                cls_layers = []
+                for _ in range(num_convs):
+                    # YOUR CODE: append nn.Conv2d(in_channels, in_channels, 3, padding=1) and then nn.ReLU() to cls_layers
+                    raise NotImplementedError
+                self.cls_tower = nn.Sequential(*cls_layers)      # runs the layers of the list one after the other
+                # 2. YOUR CODE: the box tower, self.box_tower: the same structure, built from its own list box_layers
+                # 3. YOUR CODE: self.cls_logits, a 3x3 conv (padding 1), in_channels -> num_anchors * num_classes
+                # 4. YOUR CODE: self.bbox_pred, a 3x3 conv (padding 1), in_channels -> num_anchors * 4
+                # 5. YOUR CODE: bias_value = -math.log((1 - prior) / prior) (then sigmoid(bias_value) = prior), and
+                #               nn.init.constant_(self.cls_logits.bias, bias_value) sets every bias of cls_logits to it
                 raise NotImplementedError
 
             def forward(self, feats):
-                # YOUR CODE HERE
-                raise NotImplementedError
+                cls_maps = []
+                box_maps = []
+                for f in feats:                                  # f: (N, C_in, H, W), one pyramid level
+                    # 6. YOUR CODE: cls_features = self.cls_tower(f); append self.cls_logits(cls_features)
+                    #               to cls_maps -> (N, A * K, H, W)
+                    # 7. YOUR CODE: the same with self.box_tower and self.bbox_pred for box_maps -> (N, A * 4, H, W)
+                    raise NotImplementedError
+                return cls_maps, box_maps
 
         tests.check_retina_head(RetinaHead)
         """,
         solution=r"""
         import math
         class RetinaHead(nn.Module):
+            '''RetinaHead(C_in, A, K): forward(list of feature maps (N, C_in, H, W), one per level) ->
+            (list of class maps (N, A * K, H, W), list of box maps (N, A * 4, H, W)); the same weights on every level.'''
             def __init__(self, in_channels, num_anchors, num_classes, num_convs=4, prior=0.01):
                 super().__init__()
-                def tower():
-                    layers = []
-                    for _ in range(num_convs):
-                        layers += [nn.Conv2d(in_channels, in_channels, 3, padding=1), nn.ReLU()]
-                    return nn.Sequential(*layers)
-                self.cls_tower, self.box_tower = tower(), tower()
+                # 1. the classification tower: num_convs times (3x3 conv in_channels -> in_channels, padding 1, then ReLU)
+                cls_layers = []
+                for _ in range(num_convs):
+                    cls_layers.append(nn.Conv2d(in_channels, in_channels, 3, padding=1))
+                    cls_layers.append(nn.ReLU())
+                self.cls_tower = nn.Sequential(*cls_layers)      # runs the layers of the list one after the other
+                # 2. the box tower: the same structure, its own weights
+                box_layers = []
+                for _ in range(num_convs):
+                    box_layers.append(nn.Conv2d(in_channels, in_channels, 3, padding=1))
+                    box_layers.append(nn.ReLU())
+                self.box_tower = nn.Sequential(*box_layers)
+                # 3. A * K class logits per location
                 self.cls_logits = nn.Conv2d(in_channels, num_anchors * num_classes, 3, padding=1)
+                # 4. A * 4 box deltas per location
                 self.bbox_pred = nn.Conv2d(in_channels, num_anchors * 4, 3, padding=1)
-                nn.init.constant_(self.cls_logits.bias, -math.log((1 - prior) / prior))
+                # 5. the prior: every anchor starts at P(object) = prior
+                bias_value = -math.log((1 - prior) / prior)      # sigmoid(bias_value) = prior
+                nn.init.constant_(self.cls_logits.bias, bias_value)
 
             def forward(self, feats):
-                return ([self.cls_logits(self.cls_tower(f)) for f in feats],
-                        [self.bbox_pred(self.box_tower(f)) for f in feats])
+                cls_maps = []
+                box_maps = []
+                for f in feats:                                  # f: (N, C_in, H, W), one pyramid level
+                    # 6. classification branch
+                    cls_features = self.cls_tower(f)             # (N, C_in, H, W)
+                    cls_maps.append(self.cls_logits(cls_features))   # (N, A * K, H, W)
+                    # 7. box branch
+                    box_features = self.box_tower(f)             # (N, C_in, H, W)
+                    box_maps.append(self.bbox_pred(box_features))    # (N, A * 4, H, W)
+                return cls_maps, box_maps
 
         tests.check_retina_head(RetinaHead)
         """),
     code(r"""
     # How many predictions does RetinaNet make on a 512 x 512 image? (A = 9, C = 80 COCO classes)
     head = day2.RetinaHead(256, 9, 80)
-    levels = {f"P{l}": 512 // 2 ** l for l in range(3, 8)}
+    levels = {}                                      # level name -> grid size on a 512 px image (stride 2 ** l)
+    for l in range(3, 8):
+        levels[f"P{l}"] = 512 // 2 ** l
+    level_inputs = []                                # one empty feature map (1, 256, s, s) per level
+    for s in levels.values():
+        level_inputs.append(torch.zeros(1, 256, s, s))
     with torch.no_grad():
-        cls_out, box_out = head([torch.zeros(1, 256, s, s) for s in levels.values()])
+        cls_out, box_out = head(level_inputs)
     tot = 0
     print(f"{'level':6}{'grid':>9}{'cls output':>22}{'anchors':>10}")
     for (n, s), c in zip(levels.items(), cls_out):
@@ -571,6 +748,7 @@ CELLS = [
     * $\gamma = 0$ gives (alpha-weighted) cross-entropy; $\gamma = 2$ (the paper's default) makes an example with $p_t = 0.9$ count **100x less** and one with $p_t = 0.99$ **10 000x less**;
     * $\alpha_t = \alpha$ for positives, $1-\alpha$ for negatives ($\alpha = 0.25$): a small extra re-balancing (it *down*-weights positives, because $\gamma$ already removed most negatives).
     """),
+    api("np.concatenate", "np.log", "np.clip", brief=True),
     code(r"""
     pt = np.linspace(0.001, 1, 500)
     fig, axes = plt.subplots(1, 2, figsize=(15, 4.6))
@@ -588,7 +766,9 @@ CELLS = [
         return -a * (1 - pt_) ** g * np.log(np.clip(pt_, 1e-7, 1))
     rows = []
     for name, g, a in [("CE", 0, 0.5), ("focal (gamma=2, alpha=0.25)", 2, 0.25)]:
-        easy = fl(1 - p_neg[:n_easy], g, 1 - a).sum(); hard = fl(1 - p_neg[n_easy:], g, 1 - a).sum(); pos = fl(p_pos, g, a).sum()
+        easy = fl(1 - p_neg[:n_easy], g, 1 - a).sum()           # total loss of the easy negatives (p_t = 1 - p)
+        hard = fl(1 - p_neg[n_easy:], g, 1 - a).sum()           # of the hard negatives
+        pos = fl(p_pos, g, a).sum()                             # of the positives (p_t = p)
         rows.append((name, easy, hard, pos))
     x = np.arange(2)
     tot = np.array([r[1] + r[2] + r[3] for r in rows])
@@ -633,18 +813,34 @@ CELLS = [
     exercise(
         stub=r"""
         def focal_loss(logits, targets, gamma=2.0, alpha=0.25):
-            # YOUR CODE HERE
+            '''logits, targets: tensors of the same shape (targets hold 0. or 1.) -> the mean focal loss, a 0-d tensor.'''
+            # 1. YOUR CODE: ce, the log term of every element: F.binary_cross_entropy_with_logits(logits, targets,
+            #               reduction="none") (that is -log p_t, computed stably) -> same shape as logits
+            # 2. YOUR CODE: p, the predicted probability of "object": torch.sigmoid(logits)
+            # 3. YOUR CODE: p_t, the probability of the true label: p where the target is 1, 1 - p where it is 0
+            #               (p * targets + (1 - p) * (1 - targets))
+            # 4. YOUR CODE: alpha_t: alpha for positives, 1 - alpha for negatives (the same trick with targets)
+            # 5. YOUR CODE: loss = alpha_t * (1 - p_t) ** gamma * ce, element by element
+            # 6. YOUR CODE: return the mean of loss
             raise NotImplementedError
 
         tests.check_focal_loss_torch(focal_loss)
         """,
         solution=r"""
         def focal_loss(logits, targets, gamma=2.0, alpha=0.25):
+            '''logits, targets: tensors of the same shape (targets hold 0. or 1.) -> the mean focal loss, a 0-d tensor.'''
+            # 1. ce, the log term of every element (-log p_t, computed stably)
             ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+            # 2. p, the predicted probability of "object"
             p = torch.sigmoid(logits)
+            # 3. p_t, the probability of the true label
             p_t = p * targets + (1 - p) * (1 - targets)
+            # 4. alpha_t: alpha for positives, 1 - alpha for negatives
             alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-            return (alpha_t * (1 - p_t) ** gamma * ce).mean()
+            # 5. the focal loss of every element: (1 - p_t) ** gamma shrinks the easy ones (p_t close to 1)
+            loss = alpha_t * (1 - p_t) ** gamma * ce
+            # 6. its mean
+            return loss.mean()
 
         tests.check_focal_loss_torch(focal_loss)
         """),
@@ -674,22 +870,47 @@ CELLS = [
 
     `centerness(ltrb)` for an array `(..., 4)` of positive distances.
     """),
+    api("np.minimum", "np.maximum", brief=True),
     exercise(
         stub=r"""
         def centerness(ltrb):
-            l, t, r, b = [np.asarray(ltrb, float)[..., k] for k in range(4)]
-            # YOUR CODE HERE
+            '''ltrb (..., 4): positive distances (l, t, r, b) from a point to the left, top, right and bottom box sides
+            -> centre-ness (...), in [0, 1]: 1 at the box centre, close to 0 near a side.'''
+            ltrb = np.asarray(ltrb, float)
+            # 1. the four distances, one array each: shape (...)
+            l = ltrb[..., 0]
+            t = ltrb[..., 1]
+            r = ltrb[..., 2]
+            b = ltrb[..., 3]
+            # 2. YOUR CODE: horizontal, the smaller of l and r divided by the larger, element by element
+            #               (np.minimum, np.maximum): 1 when the point is half-way between left and right
+            # 3. YOUR CODE: vertical, the same for t and b
+            # 4. YOUR CODE: return the square root of horizontal * vertical
             raise NotImplementedError
 
         tests.check_centerness(centerness)
         """,
         solution=r"""
         def centerness(ltrb):
-            l, t, r, b = [np.asarray(ltrb, float)[..., k] for k in range(4)]
-            return np.sqrt(np.minimum(l, r) / np.maximum(l, r) * np.minimum(t, b) / np.maximum(t, b))
+            '''ltrb (..., 4): positive distances (l, t, r, b) from a point to the left, top, right and bottom box sides
+            -> centre-ness (...), in [0, 1]: 1 at the box centre, close to 0 near a side.'''
+            ltrb = np.asarray(ltrb, float)
+            # 1. the four distances, one array each: shape (...)
+            l = ltrb[..., 0]
+            t = ltrb[..., 1]
+            r = ltrb[..., 2]
+            b = ltrb[..., 3]
+            # 2. horizontal: 1 when the point is half-way between left and right
+            horizontal = np.minimum(l, r) / np.maximum(l, r)
+            # 3. vertical: the same for top and bottom
+            vertical = np.minimum(t, b) / np.maximum(t, b)
+            # 4. the square root of their product
+            return np.sqrt(horizontal * vertical)
 
         tests.check_centerness(centerness)
         """),
+    api("np.mgrid", "F.max_pool2d", "np.ma.masked_where"),
+    api("np.stack", "Tensor.ravel", "np.exp", "np.where", brief=True),
     code(r"""
     fc_img, fc_boxes, fc_labels, _ = shapes.make_sample(np.random.default_rng(7), 128)
     box = fc_boxes[np.argmax(boxes.box_area(fc_boxes))]
@@ -739,6 +960,9 @@ CELLS = [
     our Pet labels are **heads** - the model is only as good as the match between its training labels
     and your task. That mismatch is why we fine-tune (D2-04).
     """),
+    api("torchvision.models.detection.fcos_resnet50_fpn"),
+    api("torchvision.transforms.v2.Compose", "torchvision.transforms.v2.ToImage", "torchvision.transforms.v2.ToDtype",
+        brief=True),
     code(r"""
     from torchvision.models.detection import fcos_resnet50_fpn, FCOS_ResNet50_FPN_Weights
     cats = RetinaNet_ResNet50_FPN_Weights.DEFAULT.meta["categories"]
@@ -748,12 +972,18 @@ CELLS = [
     from torchvision.transforms import v2
     tf = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
     idx = [5, 40, 77, 120, 260]
-    imgs = [tf(Image.open(pet_val.image_path(i)).convert("RGB")) for i in idx]
-    res = {}
+    imgs = []
+    for i in idx:
+        pil_img = Image.open(pet_val.image_path(i)).convert("RGB")
+        imgs.append(tf(pil_img))                     # (3, H, W) float in [0, 1]
+    res = {}                                         # model name -> one output dict per image
     for name, m in [("RetinaNet", retina), ("FCOS", fcos)]:
         t0 = time.time()
+        res[name] = []
         with torch.no_grad():
-            res[name] = [m([im])[0] for im in imgs]
+            for im in imgs:
+                outputs = m([im])                    # torchvision detectors take a list of images ...
+                res[name].append(outputs[0])         # ... and return a list of dicts: boxes, scores, labels
         print(f"{name}: {(time.time() - t0) / len(imgs):.2f} s / image on CPU at 512 px")
     fig, axes = plt.subplots(2, len(idx), figsize=(17, 7))
     for r, name in enumerate(res):

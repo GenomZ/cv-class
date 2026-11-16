@@ -7,3 +7,6 @@ notebooks/solutions/_executed/
 *.onnx
 
 notebooks/cvcourse/labs/_shots/
+
+# Lecture decks and handouts: local only, handed out separately
+slides/

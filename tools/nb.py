@@ -2,7 +2,7 @@
 
 Usage inside a notebook source module (tools/src/*.py):
 
-    from nb import md, code, exercise, framework, build
+    from nb import md, code, exercise, api, framework, build
 
     CELLS = [
         md("# Title"),
@@ -60,17 +60,35 @@ def framework(description: str, fallback: str = "") -> dict:
     return {"type": "code", "src": src}
 
 
-def _header(title: str, steps, topics, minutes: int, prereq: str) -> str:
+API_MISSING: list[str] = []     # names asked for in api(...) that have no reference entry yet
+
+
+def api(*names: str, title: str | None = None, brief: bool = False) -> dict:
+    """A fold-out "Functions used here" box, generated from notebooks/cvcourse/apiref.
+
+    Put it right before the first code cell (or exercise) that uses these functions.
+    `brief=True` gives one line per function: for functions already met in an earlier notebook.
+    """
+    import sys
+    nbdir = os.path.join(ROOT, "notebooks")
+    if nbdir not in sys.path:
+        sys.path.insert(0, nbdir)
+    from cvcourse import apiref
+    return {"type": "md", "src": apiref.box(names, title=title, brief=brief, missing=API_MISSING) + chr(10)}
+
+
+def _header(title: str, steps, topics, minutes: int, prereq: str, setting: str = "in class (guided + hands-on)") -> str:
     s = f"# {title}\n\n"
     s += "### Steps\n" + "\n".join(f"{i + 1}. {x}" for i, x in enumerate(steps)) + "\n\n"
     s += "### Topics covered and learning objectives\n" + "\n".join(f"- {x}" for x in topics) + "\n\n"
-    s += f"### Time estimate\n~{minutes} min in class (guided + hands-on)\n\n"
+    s += f"### Time estimate\n~{minutes} min {setting}\n\n"
     s += f"### Prerequisites\n{prereq}\n"
     return s
 
 
-def header(title, steps, topics, minutes, prereq="Neural networks and backpropagation (previous class)."):
-    return md(_header(title, steps, topics, minutes, prereq))
+def header(title, steps, topics, minutes, prereq="Neural networks and backpropagation (previous class).",
+           setting="in class (guided + hands-on)"):
+    return md(_header(title, steps, topics, minutes, prereq, setting))
 
 
 def _to_nb(cells, solution: bool):

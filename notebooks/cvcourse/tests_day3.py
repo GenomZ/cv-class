@@ -37,7 +37,7 @@ def _run(name, fn, hint):
     try:
         return fn()
     except NotImplementedError:
-        _report(name, False, "not implemented yet - replace the `raise NotImplementedError`")
+        _report(name, False, "not implemented yet: fill in the blanks, then delete the `raise NotImplementedError` line")
         return None
     except Exception as e:  # noqa: BLE001
         _report(name, False, f"{type(e).__name__}: {e}  |  {hint}")

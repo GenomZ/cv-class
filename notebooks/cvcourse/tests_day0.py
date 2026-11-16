@@ -47,6 +47,10 @@ def check_to_chw(fn):
             continue
         if not np.allclose(got.numpy(), want.transpose(2, 0, 1), atol=1e-6):
             ok = False
+            if np.allclose(got.numpy(), want.reshape(want.shape[2], *want.shape[:2]), atol=1e-6):
+                msgs.append(f"   {name}: right shape, but the pixels are scrambled: reshape / view only re-reads the same "
+                            "numbers in a new shape; move the channel axis with permute(2, 0, 1)")
+                continue
             msgs.append(f"   {name}: values differ (uint8 images must be divided by 255; float images kept as they are)")
     for m in msgs:
         print(m)

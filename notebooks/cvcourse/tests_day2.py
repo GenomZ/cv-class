@@ -51,7 +51,7 @@ def _guard(name, verbose, fn):
     try:
         return fn()
     except NotImplementedError:
-        return _report(name, False, "not implemented yet (the stub still raises NotImplementedError)", verbose)
+        return _report(name, False, "not implemented yet: fill in the blanks, then delete the `raise NotImplementedError` line", verbose)
     except Exception as e:  # noqa: BLE001
         if verbose:
             tb = traceback.format_exception_only(type(e), e)[-1].strip()

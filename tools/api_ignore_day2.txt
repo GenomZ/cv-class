@@ -1,0 +1,5 @@
+# False matches of tools/check_api.py in the Day 2 notebooks (D2-01 .. D2-04).
+# Format: <notebook> <key>   # reason
+D2-01 Tensor.repeat   # canvas = np.clip(...).repeat(3, 2): NumPy's ndarray.repeat (= np.repeat, boxed in D2-01), not Tensor.repeat (which tiles)
+D2-01 Tensor.resize   # im.resize((w, h)) on a PIL image (Image.resize), not Tensor.resize
+D2-03 Tensor.resize   # Image.open(...).convert("RGB").resize((300, 300)): PIL Image.resize, not Tensor.resize

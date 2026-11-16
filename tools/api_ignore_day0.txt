@@ -1,0 +1,5 @@
+# False matches of tools/check_api.py in D0-00 (format: <notebook> <key>  # reason).
+#
+# None needed. The one borderline match, Tensor.round in the normalisation self-check cell
+# (`x.mean(dim=(1, 2)).numpy().round(2)` calls NumPy's ndarray.round), is not silenced: the
+# Tensor.round entry explains both the tensor and the NumPy method, and is boxed before that cell.

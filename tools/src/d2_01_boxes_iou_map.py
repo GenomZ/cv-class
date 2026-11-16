@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D2-01-boxes-iou-map"
 
@@ -53,6 +53,7 @@ CELLS = [
     every detector of the day); models are PyTorch. Every exercise is followed by a checker
     that prints `[PASS]` or `[FAIL]` with a hint.
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", brief=True),
     code(SETUP),
 
     # ------------------------------------------------------------------ 1
@@ -71,6 +72,9 @@ CELLS = [
 
     Our running example is the Oxford-IIIT Pet dataset, which ships one *head* box per animal.
     """),
+    api("torchvision.transforms.v2.ToImage"),
+    api("torchvision.transforms.v2.Compose", "torchvision.transforms.v2.Resize", "torchvision.transforms.v2.ToDtype",
+        "torchkit.get_pet_datasets", "Tensor.permute", "Tensor.numpy", brief=True),
     code(r"""
     from torchvision.transforms import v2
     show_tf = v2.Compose([v2.ToImage(), v2.Resize((224, 224), antialias=True), v2.ToDtype(torch.float32, scale=True)])
@@ -100,6 +104,7 @@ CELLS = [
     width / height to $[0, 1]$, which makes them independent of the resolution (YOLO, DETR).
     Mixing formats silently is the #1 detection bug, so let us draw one box in all three.
     """),
+    api("Tensor.round", brief=True),
     code(r"""
     img, t = pet_val[300]
     b = t["boxes"][0].numpy()
@@ -132,39 +137,98 @@ CELLS = [
     Write the three conversions for arrays of shape `(..., 4)` (use `b[..., 0]` etc. so they
     work for one box and for N boxes; `np.stack(..., -1)` puts the columns back together).
     """),
+    api("np.stack", title="Functions you will need"),
+    api("np.asarray", brief=True),
     exercise(
         stub=r"""
         def xyxy_to_xywh(b):
+            '''b: boxes (..., 4) as (x1, y1, x2, y2) -> the same boxes (..., 4) as (x1, y1, w, h).'''
             b = np.asarray(b, float)
-            # YOUR CODE HERE
+            # 1. the four columns, one number per box each: shape (...)
+            x1 = b[..., 0]
+            y1 = b[..., 1]
+            x2 = b[..., 2]
+            y2 = b[..., 3]
+            # 2. YOUR CODE: w and h, the width and the height of every box
+            # 3. YOUR CODE: put the columns x1, y1, w, h back together with np.stack([...], -1) -> (..., 4); return it
             raise NotImplementedError
 
         def xyxy_to_cxcywh(b):
+            '''b: boxes (..., 4) as (x1, y1, x2, y2) -> the same boxes (..., 4) as (cx, cy, w, h).'''
             b = np.asarray(b, float)
-            # YOUR CODE HERE
+            # 1. the four columns, one number per box each: shape (...)
+            x1 = b[..., 0]
+            y1 = b[..., 1]
+            x2 = b[..., 2]
+            y2 = b[..., 3]
+            # 2. YOUR CODE: w and h, the width and the height of every box
+            # 3. YOUR CODE: cx and cy, the centre: the left edge plus half the width, the top edge plus half the height
+            # 4. YOUR CODE: put the columns cx, cy, w, h back together with np.stack([...], -1) -> (..., 4); return it
             raise NotImplementedError
 
         def cxcywh_to_xyxy(b):
+            '''b: boxes (..., 4) as (cx, cy, w, h) -> the same boxes (..., 4) as (x1, y1, x2, y2).'''
             b = np.asarray(b, float)
-            # YOUR CODE HERE
+            # 1. the four columns, one number per box each: shape (...)
+            cx = b[..., 0]
+            cy = b[..., 1]
+            w = b[..., 2]
+            h = b[..., 3]
+            # 2. YOUR CODE: x1 and y1, the top-left corner: the centre minus half the width / height
+            # 3. YOUR CODE: x2 and y2, the bottom-right corner: the centre plus half the width / height
+            # 4. YOUR CODE: put the columns x1, y1, x2, y2 back together with np.stack([...], -1) -> (..., 4); return it
             raise NotImplementedError
 
         tests.check_box_conversions(xyxy_to_xywh, xyxy_to_cxcywh, cxcywh_to_xyxy)
         """,
         solution=r"""
         def xyxy_to_xywh(b):
+            '''b: boxes (..., 4) as (x1, y1, x2, y2) -> the same boxes (..., 4) as (x1, y1, w, h).'''
             b = np.asarray(b, float)
-            return np.stack([b[..., 0], b[..., 1], b[..., 2] - b[..., 0], b[..., 3] - b[..., 1]], -1)
+            # 1. the four columns, one number per box each: shape (...)
+            x1 = b[..., 0]
+            y1 = b[..., 1]
+            x2 = b[..., 2]
+            y2 = b[..., 3]
+            # 2. w and h, the width and the height of every box
+            w = x2 - x1
+            h = y2 - y1
+            # 3. put the columns x1, y1, w, h back together
+            return np.stack([x1, y1, w, h], -1)          # (..., 4)
 
         def xyxy_to_cxcywh(b):
+            '''b: boxes (..., 4) as (x1, y1, x2, y2) -> the same boxes (..., 4) as (cx, cy, w, h).'''
             b = np.asarray(b, float)
-            w, h = b[..., 2] - b[..., 0], b[..., 3] - b[..., 1]
-            return np.stack([b[..., 0] + w / 2, b[..., 1] + h / 2, w, h], -1)
+            # 1. the four columns, one number per box each: shape (...)
+            x1 = b[..., 0]
+            y1 = b[..., 1]
+            x2 = b[..., 2]
+            y2 = b[..., 3]
+            # 2. w and h, the width and the height of every box
+            w = x2 - x1
+            h = y2 - y1
+            # 3. cx and cy, the centre: the left edge plus half the width, the top edge plus half the height
+            cx = x1 + w / 2
+            cy = y1 + h / 2
+            # 4. put the columns cx, cy, w, h back together
+            return np.stack([cx, cy, w, h], -1)          # (..., 4)
 
         def cxcywh_to_xyxy(b):
+            '''b: boxes (..., 4) as (cx, cy, w, h) -> the same boxes (..., 4) as (x1, y1, x2, y2).'''
             b = np.asarray(b, float)
-            cx, cy, w, h = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
-            return np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], -1)
+            # 1. the four columns, one number per box each: shape (...)
+            cx = b[..., 0]
+            cy = b[..., 1]
+            w = b[..., 2]
+            h = b[..., 3]
+            # 2. x1 and y1, the top-left corner: the centre minus half the width / height
+            x1 = cx - w / 2
+            y1 = cy - h / 2
+            # 3. x2 and y2, the bottom-right corner: the centre plus half the width / height
+            x2 = cx + w / 2
+            y2 = cy + h / 2
+            # 4. put the columns x1, y1, x2, y2 back together
+            return np.stack([x1, y1, x2, y2], -1)        # (..., 4)
 
         tests.check_box_conversions(xyxy_to_xywh, xyxy_to_cxcywh, cxcywh_to_xyxy)
         """),
@@ -188,6 +252,8 @@ CELLS = [
     corners, and its width / height are clipped at 0 when the boxes do not overlap. IoU is
     *scale invariant*: it does not care whether the boxes are 10 or 1000 pixels wide.
     """),
+    api("np.minimum", "Tensor.all"),
+    api("np.array", "np.maximum", brief=True),
     code(r"""
     cases = [("identical", [10, 10, 50, 50], [10, 10, 50, 50]),
              ("partial overlap", [10, 10, 50, 50], [30, 25, 70, 65]),
@@ -232,38 +298,73 @@ CELLS = [
     call this on thousands of *anchors* (fixed reference boxes tiled over the image, D2-02) x tens of
     boxes per image, so it must be vectorised.
     """),
+    api("Tensor.clip", title="Functions you will need"),
+    api("Tensor.reshape", brief=True),
     exercise(
         stub=r"""
         def box_area(b):
-            return (b[..., 2] - b[..., 0]).clip(0) * (b[..., 3] - b[..., 1]).clip(0)
+            '''b: boxes (..., 4) in xyxy -> their areas (...); a box with x2 < x1 or y2 < y1 has area 0.'''
+            widths = (b[..., 2] - b[..., 0]).clip(0)       # x2 - x1, a negative width becomes 0
+            heights = (b[..., 3] - b[..., 1]).clip(0)      # y2 - y1
+            return widths * heights
 
         def box_iou(a, b):
-            a = np.asarray(a, float).reshape(-1, 4)
-            b = np.asarray(b, float).reshape(-1, 4)
-            # YOUR CODE HERE: top-left = max of corners, bottom-right = min, clip w/h at 0,
-            # inter (N, M), union = area_a[:, None] + area_b[None, :] - inter
+            '''a: (N, 4), b: (M, 4) boxes in xyxy -> (N, M) matrix; entry [i, j] is the IoU of a[i] and b[j].'''
+            a = np.asarray(a, float).reshape(-1, 4)        # (N, 4); a single box becomes (1, 4)
+            b = np.asarray(b, float).reshape(-1, 4)        # (M, 4)
+            # 1. YOUR CODE: lt, the top-left corner of every intersection: the larger of the two top-left
+            #               corners, for every pair at once: np.maximum of a[:, None, :2] and b[None, :, :2] -> (N, M, 2)
+            # 2. YOUR CODE: rb, the bottom-right corner of every intersection: the smaller of the two
+            #               bottom-right corners (a[:, None, 2:] and b[None, :, 2:]) -> (N, M, 2)
+            # 3. YOUR CODE: wh, the width and height of every intersection: rb - lt, clipped at 0 -> (N, M, 2)
+            # 4. YOUR CODE: inter, the intersection areas: width times height -> (N, M)
+            # 5. YOUR CODE: union, area of a[i] + area of b[j] - inter, for every pair: use box_area(a)[:, None]
+            #               and box_area(b)[None, :] -> (N, M)
+            # 6. YOUR CODE: return inter / union (divide by np.maximum(union, 1e-12): two empty boxes give 0, not an error)
             raise NotImplementedError
 
-        tests.check_iou(lambda a, b: box_iou(a, b)[0, 0])
+        def iou_of_one_pair(a, b):
+            # box_iou of one box with one box is a (1, 1) matrix: return its only entry
+            return box_iou(a, b)[0, 0]
+
+        tests.check_iou(iou_of_one_pair)
         tests.check_box_iou_matrix(box_iou)
         """,
         solution=r"""
         def box_area(b):
-            return (b[..., 2] - b[..., 0]).clip(0) * (b[..., 3] - b[..., 1]).clip(0)
+            '''b: boxes (..., 4) in xyxy -> their areas (...); a box with x2 < x1 or y2 < y1 has area 0.'''
+            widths = (b[..., 2] - b[..., 0]).clip(0)       # x2 - x1, a negative width becomes 0
+            heights = (b[..., 3] - b[..., 1]).clip(0)      # y2 - y1
+            return widths * heights
 
         def box_iou(a, b):
-            a = np.asarray(a, float).reshape(-1, 4)
-            b = np.asarray(b, float).reshape(-1, 4)
-            lt = np.maximum(a[:, None, :2], b[None, :, :2])      # (N, M, 2)
-            rb = np.minimum(a[:, None, 2:], b[None, :, 2:])
-            wh = (rb - lt).clip(0)
-            inter = wh[..., 0] * wh[..., 1]
-            union = box_area(a)[:, None] + box_area(b)[None, :] - inter
-            return inter / np.maximum(union, 1e-12)
+            '''a: (N, 4), b: (M, 4) boxes in xyxy -> (N, M) matrix; entry [i, j] is the IoU of a[i] and b[j].'''
+            a = np.asarray(a, float).reshape(-1, 4)        # (N, 4); a single box becomes (1, 4)
+            b = np.asarray(b, float).reshape(-1, 4)        # (M, 4)
+            # 1. lt, the top-left corner of every intersection: the larger of the two top-left corners
+            lt = np.maximum(a[:, None, :2], b[None, :, :2])     # (N, 1, 2) against (1, M, 2) -> (N, M, 2)
+            # 2. rb, the bottom-right corner of every intersection: the smaller of the two bottom-right corners
+            rb = np.minimum(a[:, None, 2:], b[None, :, 2:])     # (N, M, 2)
+            # 3. wh, the width and height of every intersection, 0 where the boxes do not overlap
+            wh = (rb - lt).clip(0)                               # (N, M, 2)
+            # 4. inter, the intersection areas
+            inter = wh[..., 0] * wh[..., 1]                      # (N, M)
+            # 5. union, area of a[i] + area of b[j] - inter, for every pair
+            area_a = box_area(a)                                 # (N,)
+            area_b = box_area(b)                                 # (M,)
+            union = area_a[:, None] + area_b[None, :] - inter    # (N, 1) + (1, M) - (N, M) -> (N, M)
+            # 6. IoU (np.maximum(union, 1e-12): two empty boxes give 0, not an error)
+            return inter / np.maximum(union, 1e-12)              # (N, M)
 
-        tests.check_iou(lambda a, b: box_iou(a, b)[0, 0])
+        def iou_of_one_pair(a, b):
+            # box_iou of one box with one box is a (1, 1) matrix: return its only entry
+            return box_iou(a, b)[0, 0]
+
+        tests.check_iou(iou_of_one_pair)
         tests.check_box_iou_matrix(box_iou)
         """),
+    api("torchvision.ops.box_iou", "np.concatenate"),
+    api("torch.tensor", "np.random.default_rng", "np.abs", "Tensor.max", "np.linspace", brief=True),
     code(r"""
     # The library equivalent: torchvision.ops.box_iou (same maths, on tensors, GPU-ready)
     rng = np.random.default_rng(0)
@@ -350,32 +451,58 @@ CELLS = [
     `giou(a, b)` for *aligned* pairs: `a (N, 4)` and `b (N, 4)` -> `(N,)`. Compute IoU of each pair,
     then the enclosing box (min of top-left corners, max of bottom-right corners) and its area.
     """),
+    api("Tensor.prod", title="Functions you will need"),
     exercise(
         stub=r"""
         def giou(a, b):
-            a = np.asarray(a, float).reshape(-1, 4); b = np.asarray(b, float).reshape(-1, 4)
-            lt = np.maximum(a[:, :2], b[:, :2]); rb = np.minimum(a[:, 2:], b[:, 2:])
-            inter = (rb - lt).clip(0).prod(-1)
-            union = box_area(a) + box_area(b) - inter
-            iou = inter / np.maximum(union, 1e-12)
-            # YOUR CODE HERE: enclosing box C, its area, and the GIoU
+            '''a, b: (N, 4) boxes in xyxy, compared pair by pair (a[i] with b[i]) -> the GIoU of each pair, (N,).'''
+            a = np.asarray(a, float).reshape(-1, 4)        # (N, 4)
+            b = np.asarray(b, float).reshape(-1, 4)        # (N, 4)
+            # 1. the IoU of each pair, as in box_iou, but pair i only with pair i (no broadcasting)
+            lt = np.maximum(a[:, :2], b[:, :2])            # (N, 2) top-left corner of the intersection
+            rb = np.minimum(a[:, 2:], b[:, 2:])            # (N, 2) bottom-right corner of the intersection
+            wh = (rb - lt).clip(0)                         # (N, 2) its width and height, 0 without overlap
+            inter = wh.prod(-1)                            # (N,) width * height
+            union = box_area(a) + box_area(b) - inter      # (N,)
+            iou = inter / np.maximum(union, 1e-12)         # (N,)
+            # 2. YOUR CODE: c_lt, the top-left corner of the enclosing box C: the smaller of the two top-left corners -> (N, 2)
+            # 3. YOUR CODE: c_rb, the bottom-right corner of C: the larger of the two bottom-right corners -> (N, 2)
+            # 4. YOUR CODE: c_wh, the width and height of C (c_rb - c_lt, clipped at 0) -> (N, 2)
+            # 5. YOUR CODE: c_area, the area of C: width * height -> (N,)
+            # 6. YOUR CODE: empty_share, the share of C that neither box covers: (c_area - union) / c_area
+            #               (divide by np.maximum(c_area, 1e-12)); return GIoU = iou - empty_share
             raise NotImplementedError
 
         tests.check_giou(giou)
         """,
         solution=r"""
         def giou(a, b):
-            a = np.asarray(a, float).reshape(-1, 4); b = np.asarray(b, float).reshape(-1, 4)
-            lt = np.maximum(a[:, :2], b[:, :2]); rb = np.minimum(a[:, 2:], b[:, 2:])
-            inter = (rb - lt).clip(0).prod(-1)
-            union = box_area(a) + box_area(b) - inter
-            iou = inter / np.maximum(union, 1e-12)
-            c_lt = np.minimum(a[:, :2], b[:, :2]); c_rb = np.maximum(a[:, 2:], b[:, 2:])
-            c_area = (c_rb - c_lt).clip(0).prod(-1)
-            return iou - (c_area - union) / np.maximum(c_area, 1e-12)
+            '''a, b: (N, 4) boxes in xyxy, compared pair by pair (a[i] with b[i]) -> the GIoU of each pair, (N,).'''
+            a = np.asarray(a, float).reshape(-1, 4)        # (N, 4)
+            b = np.asarray(b, float).reshape(-1, 4)        # (N, 4)
+            # 1. the IoU of each pair, as in box_iou, but pair i only with pair i (no broadcasting)
+            lt = np.maximum(a[:, :2], b[:, :2])            # (N, 2) top-left corner of the intersection
+            rb = np.minimum(a[:, 2:], b[:, 2:])            # (N, 2) bottom-right corner of the intersection
+            wh = (rb - lt).clip(0)                         # (N, 2) its width and height, 0 without overlap
+            inter = wh.prod(-1)                            # (N,) width * height
+            union = box_area(a) + box_area(b) - inter      # (N,)
+            iou = inter / np.maximum(union, 1e-12)         # (N,)
+            # 2. c_lt, the top-left corner of the enclosing box C: the smaller of the two top-left corners
+            c_lt = np.minimum(a[:, :2], b[:, :2])          # (N, 2)
+            # 3. c_rb, the bottom-right corner of C: the larger of the two bottom-right corners
+            c_rb = np.maximum(a[:, 2:], b[:, 2:])          # (N, 2)
+            # 4. c_wh, the width and height of C
+            c_wh = (c_rb - c_lt).clip(0)                   # (N, 2)
+            # 5. c_area, the area of C
+            c_area = c_wh.prod(-1)                         # (N,)
+            # 6. empty_share, the share of C that neither box covers; GIoU = iou - empty_share
+            empty_share = (c_area - union) / np.maximum(c_area, 1e-12)    # (N,)
+            return iou - empty_share
 
         tests.check_giou(giou)
         """),
+    api("np.repeat", "np.diag"),
+    api("np.full_like", "Tensor.sum", brief=True),
     code(r"""
     # 1-D loss landscape: the GT is fixed, the prediction (40 x 40, then 40 x 80) slides horizontally
     gt = np.array([80, 40, 120, 80], float)
@@ -404,6 +531,9 @@ CELLS = [
     the GT and run gradient descent on its four coordinates with each loss
     (`torchvision.ops` has all of them).
     """),
+    api("torchvision.ops.generalized_box_iou_loss", "torchvision.ops.distance_box_iou_loss",
+        "torchvision.ops.complete_box_iou_loss", "torch.optim.Adam", "Tensor.diag", "np.argmax"),
+    api("Tensor.backward", "Optimizer.zero_grad", "Optimizer.step", "Tensor.detach", "Tensor.any", brief=True),
     code(r"""
     from torchvision.ops import generalized_box_iou_loss, distance_box_iou_loss, complete_box_iou_loss
     def iou_loss(p, g):
@@ -508,38 +638,65 @@ CELLS = [
     k + 1 predictions. Use `boxes.box_iou`; mark matched GTs so they cannot be used twice (setting
     their IoU to -1 is a neat trick).
     """),
+    api("np.cumsum", title="Functions you will need"),
+    api("np.argsort", "np.zeros", "Tensor.argmax", brief=True),
     exercise(
         stub=r"""
         def precision_recall(pred_boxes, pred_scores, gt_boxes, iou_threshold=0.5):
-            order = np.argsort(-np.asarray(pred_scores))
-            matched = np.zeros(len(gt_boxes), bool)
-            tp = np.zeros(len(order), bool)
+            '''pred_boxes (N, 4), pred_scores (N,), gt_boxes (M, 4), all xyxy ->
+            (precision, recall, tp): three arrays of length N in score order (highest first);
+            precision[k] and recall[k] describe the top k + 1 predictions, tp[k] is True for a true positive.'''
+            # 1. the predictions in score order, highest first
+            order = np.argsort(-np.asarray(pred_scores))     # (N,) indices into pred_boxes
+            matched = np.zeros(len(gt_boxes), bool)          # (M,) becomes True once a GT has been found
+            tp = np.zeros(len(order), bool)                  # (N,) True if the k-th prediction is a true positive
+            # 2. walk down the list: the k-th best prediction is pred_boxes[i]
             for k, i in enumerate(order):
-                # YOUR CODE HERE: IoU of prediction i with all GTs, ignore matched ones, decide TP/FP
+                if len(gt_boxes) == 0:
+                    break                                    # no GT at all: every prediction is a false positive
+                # YOUR CODE: ious, the IoU of prediction i with every GT box -> (M,)
+                #            (boxes.box_iou(pred_boxes[i][None], gt_boxes) is a (1, M) matrix: take its row 0)
+                # YOUR CODE: set the IoU of the already matched GTs to -1, so that no GT is found twice
+                # YOUR CODE: j, the index of the GT with the highest IoU
+                # YOUR CODE: if that IoU is >= iou_threshold: tp[k] = True, and GT j is now matched
                 raise NotImplementedError
-            tp_c, fp_c = np.cumsum(tp), np.cumsum(~tp)
-            precision = tp_c / (tp_c + fp_c)
-            recall = tp_c / max(len(gt_boxes), 1)
+            # 3. running counts over the list: after the top k + 1 predictions
+            tp_count = np.cumsum(tp)                          # (N,) true positives so far
+            fp_count = np.cumsum(~tp)                         # (N,) false positives so far
+            precision = tp_count / (tp_count + fp_count)      # (N,)
+            recall = tp_count / max(len(gt_boxes), 1)         # (N,)
             return precision, recall, tp
 
         tests.check_precision_recall(precision_recall)
         """,
         solution=r"""
         def precision_recall(pred_boxes, pred_scores, gt_boxes, iou_threshold=0.5):
-            order = np.argsort(-np.asarray(pred_scores))
-            matched = np.zeros(len(gt_boxes), bool)
-            tp = np.zeros(len(order), bool)
+            '''pred_boxes (N, 4), pred_scores (N,), gt_boxes (M, 4), all xyxy ->
+            (precision, recall, tp): three arrays of length N in score order (highest first);
+            precision[k] and recall[k] describe the top k + 1 predictions, tp[k] is True for a true positive.'''
+            # 1. the predictions in score order, highest first
+            order = np.argsort(-np.asarray(pred_scores))     # (N,) indices into pred_boxes
+            matched = np.zeros(len(gt_boxes), bool)          # (M,) becomes True once a GT has been found
+            tp = np.zeros(len(order), bool)                  # (N,) True if the k-th prediction is a true positive
+            # 2. walk down the list: the k-th best prediction is pred_boxes[i]
             for k, i in enumerate(order):
                 if len(gt_boxes) == 0:
-                    break
-                ious = boxes.box_iou(pred_boxes[i][None], gt_boxes)[0]
-                ious[matched] = -1                    # each GT can be found only once
+                    break                                    # no GT at all: every prediction is a false positive
+                # the IoU of prediction i with every GT box
+                ious = boxes.box_iou(pred_boxes[i][None], gt_boxes)[0]     # (1, M) matrix -> its row, (M,)
+                # the already matched GTs get IoU -1, so that no GT is found twice
+                ious[matched] = -1
+                # j, the GT with the highest IoU
                 j = ious.argmax()
+                # good enough: a true positive, and GT j is used up
                 if ious[j] >= iou_threshold:
-                    tp[k] = True; matched[j] = True
-            tp_c, fp_c = np.cumsum(tp), np.cumsum(~tp)
-            precision = tp_c / (tp_c + fp_c)
-            recall = tp_c / max(len(gt_boxes), 1)
+                    tp[k] = True
+                    matched[j] = True
+            # 3. running counts over the list: after the top k + 1 predictions
+            tp_count = np.cumsum(tp)                          # (N,) true positives so far
+            fp_count = np.cumsum(~tp)                         # (N,) false positives so far
+            precision = tp_count / (tp_count + fp_count)      # (N,)
+            recall = tp_count / max(len(gt_boxes), 1)         # (N,)
             return precision, recall, tp
 
         tests.check_precision_recall(precision_recall)
@@ -587,30 +744,48 @@ CELLS = [
     (as in the code), make precision monotone from the right, then sum `(r[i+1] - r[i]) * p[i+1]`
     wherever recall changes.
     """),
+    api("np.maximum.accumulate", "np.where"),
+    api("np.sum", brief=True),
     exercise(
         stub=r"""
         def average_precision(precision, recall):
-            p = np.concatenate([[0.0], precision, [0.0]])
-            r = np.concatenate([[0.0], recall, [1.0]])
-            # YOUR CODE HERE: 1) envelope: p[i] = max(p[i], p[i+1]) from right to left
-            #                 2) area: sum over the steps where recall changes
+            '''precision, recall: arrays of length N (from precision_recall) -> AP, the area under the PR curve (a float).'''
+            # 1. pad the curve: (recall 0, precision 0) in front, (recall 1, precision 0) at the end
+            p = np.concatenate([[0.0], precision, [0.0]])    # (N + 2,)
+            r = np.concatenate([[0.0], recall, [1.0]])       # (N + 2,)
+            # 2. YOUR CODE: the envelope: a loop from right to left, i = len(p) - 2, ..., 1, 0
+            #               (range(len(p) - 2, -1, -1)), that sets p[i] = max(p[i], p[i + 1])
+            # 3. YOUR CODE: the area: ap = 0.0, then a loop over i = 0, ..., len(r) - 2; wherever recall
+            #               changes (r[i + 1] != r[i]), add the rectangle (r[i + 1] - r[i]) * p[i + 1]
+            # 4. YOUR CODE: return ap as a float
             raise NotImplementedError
 
         tests.check_average_precision(average_precision)
         """,
         solution=r"""
         def average_precision(precision, recall):
-            p = np.concatenate([[0.0], precision, [0.0]])
-            r = np.concatenate([[0.0], recall, [1.0]])
-            p = np.maximum.accumulate(p[::-1])[::-1]          # envelope, right to left
-            idx = np.where(r[1:] != r[:-1])[0]
-            return float(np.sum((r[idx + 1] - r[idx]) * p[idx + 1]))
+            '''precision, recall: arrays of length N (from precision_recall) -> AP, the area under the PR curve (a float).'''
+            # 1. pad the curve: (recall 0, precision 0) in front, (recall 1, precision 0) at the end
+            p = np.concatenate([[0.0], precision, [0.0]])    # (N + 2,)
+            r = np.concatenate([[0.0], recall, [1.0]])       # (N + 2,)
+            # 2. the envelope, from right to left: precision never goes up when recall goes up
+            for i in range(len(p) - 2, -1, -1):              # i = len(p) - 2, ..., 1, 0
+                p[i] = max(p[i], p[i + 1])
+            # 3. the area: one rectangle wherever recall changes
+            ap = 0.0
+            for i in range(len(r) - 1):
+                if r[i + 1] != r[i]:
+                    width = r[i + 1] - r[i]                  # how much recall grows at this step
+                    height = p[i + 1]                        # the envelope's precision there
+                    ap += width * height
+            # 4. return ap as a float
+            return float(ap)
 
         tests.check_average_precision(average_precision)
         """),
     code(r"""
     p = np.concatenate([[0.0], P_toy, [0.0]]); r = np.concatenate([[0.0], R_toy, [1.0]])
-    env = np.maximum.accumulate(p[::-1])[::-1]
+    env = np.maximum.accumulate(p[::-1])[::-1]                # the envelope of Exercise 5 in one NumPy call
     fig, ax = plt.subplots(figsize=(7.5, 5))
     ax.fill_between(r, env, step="pre", color=BLUE, alpha=0.18, label="AP = shaded area")
     ax.step(r, env, where="pre", color=BLUE, lw=2.5, label="interpolated (envelope)")
@@ -634,6 +809,8 @@ CELLS = [
     positives. `boxes.mean_average_precision` pools the predictions of all images per class
     (this is how VOC / COCO do it - the PR curve is per *dataset*, not per image).
     """),
+    api("np.round", "np.clip"),
+    api("np.arange", "np.mean", brief=True),
     code(r"""
     sim_imgs, sim_gt_boxes, sim_gt_labels, _ = shapes.make_dataset(300, 128, seed=5)
     rng = np.random.default_rng(1)
@@ -649,17 +826,33 @@ CELLS = [
         sim_gts.append({"boxes": gb, "labels": gl})
 
     thr = np.round(np.arange(0.5, 0.96, 0.05), 2)
-    ap_per_thr = [boxes.mean_average_precision(sim_preds, sim_gts, 3, (t,))[1] for t in thr]
+    ap_per_thr = []                          # one array of 3 per-class APs for every IoU threshold
+    for iou_thr in thr:
+        _, ap_per_class = boxes.mean_average_precision(sim_preds, sim_gts, 3, (iou_thr,))
+        ap_per_thr.append(ap_per_class)
     map50, per_class50 = boxes.mean_average_precision(sim_preds, sim_gts, 3, (0.5,))
     map_coco, _ = boxes.mean_average_precision(sim_preds, sim_gts, 3, tuple(thr))
 
     # size buckets (COCO uses 32^2 / 96^2 px on ~640 px images; we scale them to our 128 px images)
     def size_filter(d, lo, hi):
-        a = boxes.box_area(d["boxes"]); k = (a >= lo) & (a < hi)
-        return {key: v[k] for key, v in d.items()}
+        # keep only the boxes (and their scores / labels) with an area in [lo, hi)
+        area = boxes.box_area(d["boxes"])
+        in_bucket = (area >= lo) & (area < hi)
+        filtered = {}
+        for key, values in d.items():
+            filtered[key] = values[in_bucket]
+        return filtered
     buckets = {"small (< 24^2)": (0, 24 ** 2), "medium": (24 ** 2, 36 ** 2), "large (>= 36^2)": (36 ** 2, 1e9)}
-    size_map = {k: boxes.mean_average_precision([size_filter(p, *v) for p in sim_preds], [size_filter(g, *v) for g in sim_gts], 3, tuple(thr))[0]
-                for k, v in buckets.items()}
+    size_map = {}                            # bucket name -> mAP@[.5:.95] on the objects of that size only
+    for bucket_name, (lo, hi) in buckets.items():
+        preds_in_bucket = []
+        for pred_dict in sim_preds:
+            preds_in_bucket.append(size_filter(pred_dict, lo, hi))
+        gts_in_bucket = []
+        for gt_dict in sim_gts:
+            gts_in_bucket.append(size_filter(gt_dict, lo, hi))
+        bucket_map, _ = boxes.mean_average_precision(preds_in_bucket, gts_in_bucket, 3, tuple(thr))
+        size_map[bucket_name] = bucket_map
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.3))
     for c, name in enumerate(shapes.CLASS_NAMES):
@@ -739,13 +932,22 @@ CELLS = [
     We use an ImageNet ResNet-50 (it knows ~120 dog breeds and 5 cat classes) on a canvas with
     several Pet images pasted on it. (Swap in your D1-04 fine-tuned Pet model if you have it.)
     """),
+    api("torchvision.models.resnet50", "Module.children"),
+    api("Module.eval", "nn.Sequential", "nn.Conv2d", "Tensor.clone", "torch.no_grad", "Tensor.mean", "Tensor.abs",
+        "Tensor.softmax", "torch.stack", brief=True),
     code(r"""
     from PIL import Image
     net = torchvision.models.resnet50(weights="IMAGENET1K_V2").eval()
     body = nn.Sequential(*list(net.children())[:-2])          # everything up to layer4 (no pooling, no fc)
     fc_conv = nn.Conv2d(2048, 1000, 1)                        # the fc layer as a 1x1 convolution
-    fc_conv.weight.data = net.fc.weight.data[:, :, None, None].clone(); fc_conv.bias.data = net.fc.bias.data.clone()
-    norm = lambda x: (x - torch.tensor(torchkit.IMAGENET_MEAN)[:, None, None]) / torch.tensor(torchkit.IMAGENET_STD)[:, None, None]
+    fc_conv.weight.data = net.fc.weight.data[:, :, None, None].clone()   # (1000, 2048) -> (1000, 2048, 1, 1)
+    fc_conv.bias.data = net.fc.bias.data.clone()
+
+    def norm(x):
+        # ImageNet normalisation of a (3, H, W) image, channel by channel
+        mean = torch.tensor(torchkit.IMAGENET_MEAN)[:, None, None]    # (3, 1, 1)
+        std = torch.tensor(torchkit.IMAGENET_STD)[:, None, None]      # (3, 1, 1)
+        return (x - mean) / std
 
     # sanity check on one 224 px image: mean of the score map == the classifier's logits
     x224 = norm(pet_val[0][0])[None]
@@ -756,8 +958,16 @@ CELLS = [
     # a 448 x 704 canvas with three pets (from the validation set) on a textured background
     rng = np.random.default_rng(3)
     canvas = np.clip(0.55 + 0.08 * rng.normal(size=(448, 704, 1)) + np.linspace(-.1, .1, 704)[None, :, None], 0, 1).repeat(3, 2)
-    cat_idx = next(i for i in range(len(pet_val)) if pet_val.image_path(i).stem[0].isupper())
-    dog_idx = [i for i in range(len(pet_val)) if pet_val.image_path(i).stem[0].islower()][5:7]
+    # one cat and two dogs (cat breeds have file names with a capital first letter, dog breeds a small one)
+    cat_idx = None
+    dog_candidates = []
+    for i in range(len(pet_val)):
+        first_letter = pet_val.image_path(i).stem[0]
+        if cat_idx is None and first_letter.isupper():
+            cat_idx = i                                       # the first cat
+        if first_letter.islower():
+            dog_candidates.append(i)
+    dog_idx = dog_candidates[5:7]                             # the 6th and 7th dog
     for i, (y, x, s) in zip([cat_idx] + dog_idx, [(40, 30, 230), (190, 300, 230), (60, 500, 190)]):
         im = Image.open(pet_val.image_path(i)).convert("RGB"); r = s / max(im.size)
         im = np.asarray(im.resize((int(im.width * r), int(im.height * r)))) / 255.0
@@ -775,8 +985,14 @@ CELLS = [
     """),
     code(r"""
     # The same thing done the slow way: crop 224 x 224 windows with stride 64 and classify each
-    wins = [(y, x) for y in range(0, 448 - 223, 64) for x in range(0, 704 - 223, 64)]
-    crops = torch.stack([xc[0, :, y:y + 224, x:x + 224] for y, x in wins])
+    wins = []                                                 # top-left corner (y, x) of every window, row by row
+    for y in range(0, 448 - 223, 64):
+        for x in range(0, 704 - 223, 64):
+            wins.append((y, x))
+    crop_list = []
+    for y, x in wins:
+        crop_list.append(xc[0, :, y:y + 224, x:x + 224])      # (3, 224, 224)
+    crops = torch.stack(crop_list)                            # (number of windows, 3, 224, 224)
     t0 = time.perf_counter()
     with torch.no_grad():
         pw = net(crops).softmax(1)
@@ -890,13 +1106,22 @@ CELLS = [
     integer array with the indices (into `bxs`) of the kept boxes, highest score first. A remaining
     box is removed when its IoU with the kept box is $\ge$ `iou_threshold`. Use `boxes.box_iou`.
     """),
+    api("torchvision.ops.nms", "np.array_equal", "np.sort"),
     exercise(
         stub=r"""
         def nms(bxs, scores, iou_threshold=0.5):
-            order = np.argsort(-scores)
+            '''bxs (N, 4) in xyxy, scores (N,) -> integer array with the indices of the kept boxes, highest score first.'''
+            # 1. the boxes still in the race, as indices into bxs, highest score first
+            order = np.argsort(-scores)                      # (N,)
             keep = []
+            # 2. repeat until no box is left
             while len(order) > 0:
-                # YOUR CODE HERE: keep order[0], drop the rest whose IoU with it is >= threshold
+                # YOUR CODE: best, the first index of order (the highest score left); append int(best) to keep
+                # YOUR CODE: rest, all the other indices of order (order[1:])
+                # YOUR CODE: ious, the IoU of box best with each box of rest -> (len(rest),)
+                #            (boxes.box_iou(bxs[best][None], bxs[rest]) is a (1, len(rest)) matrix: take its row 0)
+                # YOUR CODE: survives, True for the boxes of rest whose IoU with best is < iou_threshold
+                # YOUR CODE: order = the indices of rest that survive (rest[survives])
                 raise NotImplementedError
             return np.array(keep)
 
@@ -904,28 +1129,50 @@ CELLS = [
         """,
         solution=r"""
         def nms(bxs, scores, iou_threshold=0.5):
-            order = np.argsort(-scores)
+            '''bxs (N, 4) in xyxy, scores (N,) -> integer array with the indices of the kept boxes, highest score first.'''
+            # 1. the boxes still in the race, as indices into bxs, highest score first
+            order = np.argsort(-scores)                      # (N,)
             keep = []
+            # 2. repeat until no box is left
             while len(order) > 0:
-                i = order[0]
-                keep.append(int(i))
-                ious = boxes.box_iou(bxs[i][None], bxs[order[1:]])[0]
-                order = order[1:][ious < iou_threshold]
+                # the highest score left: keep it
+                best = order[0]
+                keep.append(int(best))
+                # all the others
+                rest = order[1:]
+                # their IoU with the kept box
+                ious = boxes.box_iou(bxs[best][None], bxs[rest])[0]     # (1, len(rest)) matrix -> its row
+                # the look-alikes (IoU >= threshold) are removed, the others stay in the race
+                survives = ious < iou_threshold                         # (len(rest),) True / False
+                order = rest[survives]
             return np.array(keep)
 
         tests.check_nms(nms)
+        # the library version keeps the same boxes
         lib = torchvision.ops.nms(torch.tensor(cand), torch.tensor(cand_s), 0.5).numpy()
-        print("same result as torchvision.ops.nms:", np.array_equal(np.sort(nms(cand, cand_s, 0.5)), np.sort(lib)))
+        ours = nms(cand, cand_s, 0.5)
+        print("same result as torchvision.ops.nms:", np.array_equal(np.sort(ours), np.sort(lib)))
         """),
     code(r"""
     # Greedy NMS step by step (reference implementation, recording every iteration)
-    order = list(np.argsort(-cand_s)); kept, removed_at = [], {}
-    snapshots = []
+    order = list(np.argsort(-cand_s))        # candidates still in the race, highest score first
+    kept = []
+    snapshots = []                           # after every step: (kept so far, removed in this step, still waiting)
     while order:
-        i = order.pop(0); kept.append(i)
-        ious = boxes.box_iou(cand[i][None], cand[order])[0] if order else np.array([])
-        gone = [o for o, v in zip(order, ious) if v >= 0.5]
-        order = [o for o, v in zip(order, ious) if v < 0.5]
+        best = order.pop(0)                  # the highest score left ...
+        kept.append(best)                    # ... is kept
+        if order:
+            ious = boxes.box_iou(cand[best][None], cand[order])[0]    # its IoU with every waiting candidate
+        else:
+            ious = np.array([])
+        gone = []                            # IoU >= 0.5 with the kept box: removed
+        waiting = []                         # the others stay in the race
+        for other, iou in zip(order, ious):
+            if iou >= 0.5:
+                gone.append(other)
+            else:
+                waiting.append(other)
+        order = waiting
         snapshots.append((list(kept), list(gone), list(order)))
     fig, axes = plt.subplots(1, len(snapshots) + 1, figsize=(4 * (len(snapshots) + 1), 4.3))
     axes[0].imshow(nms_img); axes[0].set_title(f"{len(cand)} candidates")
@@ -975,15 +1222,23 @@ CELLS = [
     of the same length, in the order the boxes were picked. This is the loop you stepped through in
     the lab; its "now" column is `scores` after each step.
     """),
+    api("np.exp", title="Functions you will need"),
     exercise(
         stub=r"""
         def soft_nms(bxs, scores, sigma=0.5, score_threshold=0.001):
-            scores = np.asarray(scores, float).copy()
-            idx = np.arange(len(scores))
-            keep, kept_scores = [], []
+            '''bxs (N, 4) in xyxy, scores (N,) -> (kept indices, their scores when picked), in the order they were picked.'''
+            scores = np.asarray(scores, float).copy()        # (N,) current scores (a copy: the caller's array stays as it is)
+            idx = np.arange(len(scores))                     # indices of the boxes still in the race
+            keep = []                                        # the picked indices, in order
+            kept_scores = []                                 # their scores at the moment they were picked
             while idx.size > 0:
-                # YOUR CODE HERE: m = remaining index with max score; record it; remove it from idx;
-                # decay scores[idx] *= exp(-IoU(m, idx)^2 / sigma); keep only scores > score_threshold
+                # 1. YOUR CODE: m, the index in idx with the highest current score
+                #               (position = np.argmax(scores[idx]) is a position inside idx; m = idx[position])
+                # 2. YOUR CODE: record it: append int(m) to keep and float(scores[m]) to kept_scores
+                # 3. YOUR CODE: remove m from idx (keep the entries of idx that are != m); break if idx is now empty
+                # 4. YOUR CODE: ious, the IoU of box m with each remaining box bxs[idx] -> (len(idx),)
+                # 5. YOUR CODE: decay, np.exp(-ious ** 2 / sigma); multiply scores[idx] by it
+                # 6. YOUR CODE: keep in idx only the boxes whose score is still > score_threshold
                 raise NotImplementedError
             return np.array(keep), np.array(kept_scores)
 
@@ -991,17 +1246,28 @@ CELLS = [
         """,
         solution=r"""
         def soft_nms(bxs, scores, sigma=0.5, score_threshold=0.001):
-            scores = np.asarray(scores, float).copy()
-            idx = np.arange(len(scores))
-            keep, kept_scores = [], []
+            '''bxs (N, 4) in xyxy, scores (N,) -> (kept indices, their scores when picked), in the order they were picked.'''
+            scores = np.asarray(scores, float).copy()        # (N,) current scores (a copy: the caller's array stays as it is)
+            idx = np.arange(len(scores))                     # indices of the boxes still in the race
+            keep = []                                        # the picked indices, in order
+            kept_scores = []                                 # their scores at the moment they were picked
             while idx.size > 0:
-                m = idx[np.argmax(scores[idx])]
-                keep.append(int(m)); kept_scores.append(float(scores[m]))
+                # 1. m, the index in idx with the highest current score
+                position = np.argmax(scores[idx])            # a position inside idx
+                m = idx[position]                            # an index into bxs
+                # 2. record it
+                keep.append(int(m))
+                kept_scores.append(float(scores[m]))
+                # 3. remove m from idx; stop when nothing is left
                 idx = idx[idx != m]
                 if idx.size == 0:
                     break
-                ious = boxes.box_iou(bxs[m][None], bxs[idx])[0]
-                scores[idx] *= np.exp(-ious ** 2 / sigma)
+                # 4. the IoU of box m with each remaining box
+                ious = boxes.box_iou(bxs[m][None], bxs[idx])[0]   # (1, len(idx)) matrix -> its row
+                # 5. decay: 1 (no change) without overlap, close to 0 for a near duplicate
+                decay = np.exp(-ious ** 2 / sigma)                 # (len(idx),)
+                scores[idx] *= decay
+                # 6. drop the boxes whose score fell below the threshold
                 idx = idx[scores[idx] > score_threshold]
             return np.array(keep), np.array(kept_scores)
 
@@ -1042,6 +1308,8 @@ CELLS = [
     `label * (max coordinate + 1)` so that boxes of different classes can never overlap, then run
     one ordinary NMS. (The lab's *person + horse* scene shows the same thing on a realistic layout.)
     """),
+    api("torchvision.ops.batched_nms"),
+    api("Tensor.tolist", brief=True),
     code(r"""
     cw_boxes = np.array([[20, 20, 80, 80], [24, 22, 82, 84], [22, 18, 78, 82], [90, 30, 140, 90]], float)
     cw_scores = np.array([0.9, 0.85, 0.6, 0.7]); cw_labels = np.array([0, 1, 0, 1])
@@ -1069,11 +1337,18 @@ CELLS = [
     *highest loss*: typically all positives + the top-scoring negatives at a 1:3 ratio. Below, a
     toy "detector" that fires on colourful windows scores every 32 x 32 window of a shapes image.
     """),
+    api("Tensor.min", "np.log", brief=True),
     code(r"""
     hn_img, hn_gt, _, _ = shapes.make_sample(np.random.default_rng(4), 160, max_objects=4, min_r=12, max_r=20)
-    wins = np.array([[x, y, x + 32, y + 32] for y in range(0, 129, 4) for x in range(0, 129, 4)], float)
-    sat = hn_img.max(-1) - hn_img.min(-1)
-    score = np.array([sat[int(b[1]):int(b[3]), int(b[0]):int(b[2])].mean() for b in wins])
+    sat = hn_img.max(-1) - hn_img.min(-1)                          # (160, 160) how colourful every pixel is
+    win_list = []                                                  # every 32 x 32 window (stride 4), xyxy
+    mean_sat = []                                                  # the mean colourfulness inside it
+    for y in range(0, 129, 4):
+        for x in range(0, 129, 4):
+            win_list.append([x, y, x + 32, y + 32])
+            mean_sat.append(sat[y:y + 32, x:x + 32].mean())
+    wins = np.array(win_list, float)                               # (1089, 4)
+    score = np.array(mean_sat)                                     # (1089,)
     score = 1 / (1 + np.exp(-30 * (score - 0.25)))                 # toy classifier: P(object | colourful window)
     is_pos = boxes.box_iou(wins, hn_gt).max(1) >= 0.5
     neg_loss = -np.log(1 - score[~is_pos] + 1e-6)                 # BCE of each negative

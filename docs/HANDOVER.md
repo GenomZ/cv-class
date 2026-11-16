@@ -34,6 +34,25 @@ fill in the "missing parts" (exercise cells) and get immediate `[PASS]`/`[FAIL]`
   `transformers`, `open_clip_torch`, `onnx`, `opencv-contrib-python`,
   `segmentation-models-pytorch`, `torchmetrics` (all optional, all guarded in the notebooks).
 * No remote, no CI.
+* **Student-facing layout (2026-11-10).** `README.md` now opens with the student quick start;
+  `notebooks/README.md` lists the notebooks; this file moved from the repository root to
+  `docs/`. A fresh clone with only `requirements.txt` installed runs D0-00 and D1-01 end to end
+  (the datasets download on first use).
+* **Function hint boxes (2026-11-16).** Every library function a notebook calls (torch, nn, F,
+  tensor / module / optimizer methods, torchvision, numpy, scipy, timm, `torchkit`) is explained
+  in a fold-out box before its first use: 301 entries in `notebooks/cvcourse/apiref/_day*.py`
+  (what it does, a doctest example with real output, the classic mistake), placed with
+  `api(...)` cells in `tools/src` (271 boxes; functions met in an earlier notebook get a one-line
+  `brief=True` box). `python tools/check_api.py` runs all examples and checks coverage per
+  notebook; false matches go in `tools/api_ignore_*.txt`. Contract:
+  `docs/09-function-reference-brief.md`. **Rule:** when a code cell starts using a new library
+  function, add its entry and box, and keep `check_api.py` passing. Students can also call
+  `apiref.show / search / index`. Rendering of the boxes was checked through nbconvert HTML only,
+  not yet in JupyterLab / VS Code (same caveat as T10).
+* **Lecture decks (2026-11-10), not in git.** `slides/` is git-ignored on purpose: one animated
+  HTML deck per day (`slides/day*.html`, engine `deck.js` + `deck.css`, contract in
+  `slides/README.md`) and the static take-home PDFs in `slides/handout/`, printed by
+  `python slides/build.py`. They exist only on the instructor's machine; back them up separately.
 * **Interactive labs (added 2026-11-10).** 26 self-contained HTML labs in
   `notebooks/cvcourse/labs/`, embedded in the notebooks with `labs.show("name")` (29 lab cells
   across the 13 notebooks, each preceded by a "Predict first" question). Every number a lab

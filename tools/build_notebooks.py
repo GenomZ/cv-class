@@ -13,6 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "src"))
 
+import nb  # noqa: E402
 from nb import build  # noqa: E402
 
 SRC = os.path.join(HERE, "src")
@@ -24,3 +25,7 @@ for fname in sorted(os.listdir(SRC)):
     mod = importlib.import_module(fname[:-3])
     student, solution = build(mod.NAME, mod.CELLS)
     print(f"built {os.path.relpath(student)}  (+ solution, {len(mod.CELLS)} cells)")
+
+if nb.API_MISSING:
+    print("api(...) names without a reference entry (add them in notebooks/cvcourse/apiref/_dayN.py):")
+    print("  " + ", ".join(sorted(set(nb.API_MISSING))))

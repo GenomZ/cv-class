@@ -55,7 +55,7 @@ All functions typed and docstringed; a `if __name__ == "__main__":` smoke test t
 
 Time = minutes in class. "Figures" = generated in the notebook. "Exercises" = what students fill in (checker in brackets). "PyTorch" = the training / model cells.
 
-### D0-00 · Setup and tensors (20 min, optional pre-course)
+### D0-00 · Setup and tensors (about 90 min, pre-course, self-study)
 Steps: environment check (torch, torchvision, GPU), download script for all datasets + checkpoints, tensor refresher (shapes, broadcasting, `permute` between HWC and CHW, `unsqueeze` batch dim), autograd in 5 lines, a 10-line training loop on a linear model.
 Figures: none beyond a batch grid of each dataset (FashionMNIST, Pet with boxes and trimap, Penn-Fudan with masks, shapes).
 Exercises: `to_chw(img_hwc) -> tensor` [check by shape]; write the 10-line loop.

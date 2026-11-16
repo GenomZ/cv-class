@@ -1,0 +1,7 @@
+# False matches of tools/check_api.py in D1-01 (format: <notebook> <key>  # reason).
+#
+# None needed. Sections 1-7 of D1-01 call NumPy array methods that the checker reports as
+# Tensor.* (img.min(), img.max(), img.reshape(-1, 3).mean(0) / .std(0), img.transpose(2, 0, 1),
+# np.abs(...).max()). They are not silenced: the Tensor.min / max / std / mean / reshape /
+# transpose entries describe the NumPy method as well (including where it differs: arr.std()
+# divides by N, arr.transpose takes the full axis order), and they are boxed before first use.

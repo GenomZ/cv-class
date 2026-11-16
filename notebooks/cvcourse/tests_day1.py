@@ -40,7 +40,7 @@ def _safe(name):
             try:
                 return fn(*a, **k)
             except NotImplementedError:
-                return _report(name, False, "not implemented yet - replace `raise NotImplementedError` with your code")
+                return _report(name, False, "not implemented yet: fill in the blanks, then delete the `raise NotImplementedError` line")
             except Exception as e:  # noqa: BLE001
                 tb = traceback.extract_tb(e.__traceback__)
                 where = f" (line {tb[-1].lineno} in {tb[-1].name})" if tb else ""

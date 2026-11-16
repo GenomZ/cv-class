@@ -1,0 +1,2 @@
+# False matches of tools/check_api.py in D1-02, D1-03 and D1-04 (format: notebook key  # reason).
+D1-04 torchkit._balanced_subset   # private course helper (leading underscore): picks a class-balanced subset of indices; not part of the documented API

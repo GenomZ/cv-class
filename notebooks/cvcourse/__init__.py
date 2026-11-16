@@ -14,6 +14,6 @@ tests    : checkers for the exercises (`tests.check_iou(my_iou)` etc.)
 labs     : interactive browser labs embedded in the notebooks (`labs.show("conv-playground")`)
 """
 
-from . import viz, convops, boxes, seg, shapes, tests, labs  # noqa: F401
+from . import viz, convops, boxes, seg, shapes, tests, labs, apiref  # noqa: F401
 
-__all__ = ["viz", "convops", "boxes", "seg", "shapes", "tests", "labs"]
+__all__ = ["viz", "convops", "boxes", "seg", "shapes", "tests", "labs", "apiref"]

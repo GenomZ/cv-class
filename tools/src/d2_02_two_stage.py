@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D2-02-two-stage"
 
@@ -49,6 +49,7 @@ CELLS = [
     md(r"""
     ## 0 · Setup
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", brief=True),
     code(SETUP),
     md(r"""
     ## The big picture
@@ -98,33 +99,68 @@ CELLS = [
     Return all anchors of one level as `(fh * fw * A, 4)` xyxy, ordered cell by cell (row, column,
     anchor). Build the `A` base boxes centred at 0, the grid of centres, and add them with broadcasting.
     """),
+    api("np.sqrt", title="Functions you will need"),
+    api("np.array", "np.arange", "np.stack", "Tensor.reshape", brief=True),
     exercise(
         stub=r"""
         def make_anchors(feature_size, stride, scales, ratios):
+            '''feature_size = (fh, fw) cells, stride in pixels, scales and ratios: lists ->
+            all anchors of the level, (fh * fw * A, 4) xyxy, A = len(scales) * len(ratios),
+            ordered cell by cell (row, then column), then anchor by anchor.'''
             fh, fw = feature_size
-            s, r = np.meshgrid(np.asarray(scales, float), np.asarray(ratios, float), indexing="ij")
-            # YOUR CODE HERE:
-            # 1) widths w = s / sqrt(r), heights h = s * sqrt(r)   (flatten -> A values)
-            # 2) base boxes (A, 4) = [-w/2, -h/2, w/2, h/2]
-            # 3) centres cx = (j + 0.5) * stride, cy = (i + 0.5) * stride on a (fh, fw) grid
-            # 4) centres (fh*fw, 1, 4) + base (1, A, 4) -> reshape (-1, 4)
+            # 1. the A base boxes, centred at (0, 0): one per (scale, ratio) pair
+            base = []
+            for scale in scales:
+                for ratio in ratios:
+                    # YOUR CODE: w and h of this anchor: w = scale / sqrt(ratio), h = scale * sqrt(ratio)
+                    # YOUR CODE: append the box [-w / 2, -h / 2, w / 2, h / 2] to base
+                    raise NotImplementedError
+            base = np.array(base)                            # (A, 4)
+            # 2. the centre of every cell, row by row, in pixels
+            centres = []
+            for i in range(fh):                              # row
+                for j in range(fw):                          # column
+                    # YOUR CODE: cx = (j + 0.5) * stride, cy = (i + 0.5) * stride; append [cx, cy, cx, cy]
+                    raise NotImplementedError
+            centres = np.array(centres)                      # (fh * fw, 4)
+            # 3. YOUR CODE: every centre plus every base box, with broadcasting:
+            #               centres[:, None, :] + base[None, :, :] -> (fh * fw, A, 4)
+            # 4. YOUR CODE: reshape to (fh * fw * A, 4) and return it
             raise NotImplementedError
 
         tests.check_make_anchors(make_anchors)
         """,
         solution=r"""
         def make_anchors(feature_size, stride, scales, ratios):
+            '''feature_size = (fh, fw) cells, stride in pixels, scales and ratios: lists ->
+            all anchors of the level, (fh * fw * A, 4) xyxy, A = len(scales) * len(ratios),
+            ordered cell by cell (row, then column), then anchor by anchor.'''
             fh, fw = feature_size
-            s, r = np.meshgrid(np.asarray(scales, float), np.asarray(ratios, float), indexing="ij")
-            w = (s / np.sqrt(r)).reshape(-1)
-            h = (s * np.sqrt(r)).reshape(-1)
-            base = np.stack([-w / 2, -h / 2, w / 2, h / 2], -1)                  # (A, 4)
-            cx, cy = np.meshgrid((np.arange(fw) + 0.5) * stride, (np.arange(fh) + 0.5) * stride)
-            centres = np.stack([cx, cy, cx, cy], -1).reshape(-1, 1, 4)          # (fh*fw, 1, 4)
-            return (centres + base[None]).reshape(-1, 4)
+            # 1. the A base boxes, centred at (0, 0): one per (scale, ratio) pair
+            base = []
+            for scale in scales:
+                for ratio in ratios:
+                    # same area for every ratio: w * h = scale ** 2, and h / w = ratio
+                    w = scale / np.sqrt(ratio)
+                    h = scale * np.sqrt(ratio)
+                    base.append([-w / 2, -h / 2, w / 2, h / 2])
+            base = np.array(base)                            # (A, 4)
+            # 2. the centre of every cell, row by row, in pixels
+            centres = []
+            for i in range(fh):                              # row
+                for j in range(fw):                          # column
+                    cx = (j + 0.5) * stride
+                    cy = (i + 0.5) * stride
+                    centres.append([cx, cy, cx, cy])
+            centres = np.array(centres)                      # (fh * fw, 4)
+            # 3. every centre plus every base box, with broadcasting
+            anchors = centres[:, None, :] + base[None, :, :] # (fh * fw, 1, 4) + (1, A, 4) -> (fh * fw, A, 4)
+            # 4. one row per anchor
+            return anchors.reshape(-1, 4)                    # (fh * fw * A, 4)
 
         tests.check_make_anchors(make_anchors)
         """),
+    api("torchkit.get_penn_fudan", "F.interpolate", "Tensor.permute", "Tensor.numpy", "np.array", brief=True),
     code(r"""
     from PIL import Image
     pf = torchkit.get_penn_fudan()
@@ -207,30 +243,51 @@ CELLS = [
     `boxes.box_iou`. The green anchors in the lab are the `labels == 1` entries; the dashed "forced"
     ones come from the `allow_low_quality` branch.
     """),
+    api("np.full", "Tensor.argmax", "Tensor.max", "np.random.default_rng", "Tensor.sum", "Tensor.mean", brief=True),
     exercise(
         stub=r"""
         def match_anchors(anchors, gt, pos_iou=0.7, neg_iou=0.3, allow_low_quality=True):
+            '''anchors (N, 4), gt (G, 4), xyxy -> (best_gt, labels): two integer arrays of length N.
+            labels: 1 positive, 0 negative (background), -1 ignore; best_gt[n] = the GT that anchor n regresses to.'''
+            # 1. the IoU of every anchor with every GT
             ious = boxes.box_iou(anchors, gt)                 # (N, G)
-            best_gt, best_iou = ious.argmax(1), ious.max(1)
-            labels = np.full(len(anchors), -1)
-            # YOUR CODE HERE: negatives, positives, then the low-quality rule
-            # (hint: ious.argmax(0) is the best anchor of every GT)
-            raise NotImplementedError
+            # 2. for every anchor: its best GT, and that IoU
+            best_gt = ious.argmax(1)                          # (N,) index of the best GT (along axis 1 = over the GTs)
+            best_iou = ious.max(1)                            # (N,) its IoU
+            # 3. start with every anchor on "ignore"
+            labels = np.full(len(anchors), -1)                # (N,)
+            # 4. YOUR CODE: negatives: label 0 where best_iou < neg_iou (a boolean mask as the index)
+            # 5. YOUR CODE: positives: label 1 where best_iou >= pos_iou
+            # 6. low-quality rule: every GT also makes its best anchor positive
+            if allow_low_quality:
+                # YOUR CODE: best_anchor, the best anchor of every GT: argmax over the anchors (axis 0) -> (G,)
+                # YOUR CODE: label those anchors 1
+                # YOUR CODE: and point them at their GT: best_gt[best_anchor] = np.arange(len(gt))
+                raise NotImplementedError
             return best_gt, labels
 
         tests.check_match_anchors(match_anchors)
         """,
         solution=r"""
         def match_anchors(anchors, gt, pos_iou=0.7, neg_iou=0.3, allow_low_quality=True):
+            '''anchors (N, 4), gt (G, 4), xyxy -> (best_gt, labels): two integer arrays of length N.
+            labels: 1 positive, 0 negative (background), -1 ignore; best_gt[n] = the GT that anchor n regresses to.'''
+            # 1. the IoU of every anchor with every GT
             ious = boxes.box_iou(anchors, gt)                 # (N, G)
-            best_gt, best_iou = ious.argmax(1), ious.max(1)
-            labels = np.full(len(anchors), -1)
+            # 2. for every anchor: its best GT, and that IoU
+            best_gt = ious.argmax(1)                          # (N,) index of the best GT (along axis 1 = over the GTs)
+            best_iou = ious.max(1)                            # (N,) its IoU
+            # 3. start with every anchor on "ignore"
+            labels = np.full(len(anchors), -1)                # (N,)
+            # 4. negatives
             labels[best_iou < neg_iou] = 0
+            # 5. positives
             labels[best_iou >= pos_iou] = 1
+            # 6. low-quality rule: every GT also makes its best anchor positive
             if allow_low_quality:
-                best_anchor = ious.argmax(0)                  # (G,) best anchor of every GT
+                best_anchor = ious.argmax(0)                  # (G,) the best anchor of every GT
                 labels[best_anchor] = 1
-                best_gt[best_anchor] = np.arange(len(gt))
+                best_gt[best_anchor] = np.arange(len(gt))     # anchor best_anchor[g] regresses to GT g
             return best_gt, labels
 
         tests.check_match_anchors(match_anchors)
@@ -312,36 +369,64 @@ CELLS = [
     `boxes.cxcywh_to_xyxy`. The checker tests what the lab's "snap deltas to the target" button
     showed: `decode(encode(g, a), a)` gives back `g`.
     """),
+    api("np.log", "np.exp", brief=True),
     exercise(
         stub=r"""
         def encode(gt, anchors):
-            g, a = boxes.xyxy_to_cxcywh(gt), boxes.xyxy_to_cxcywh(anchors)
-            # YOUR CODE HERE -> (N, 4) deltas
+            '''gt, anchors: (N, 4) xyxy, aligned (gt[n] belongs to anchors[n]) -> deltas (N, 4) = (tx, ty, tw, th).'''
+            # 1. both in cxcywh: columns 0, 1, 2, 3 are cx, cy, w, h
+            g = boxes.xyxy_to_cxcywh(gt)                     # (N, 4)
+            a = boxes.xyxy_to_cxcywh(anchors)                # (N, 4)
+            # 2. YOUR CODE: tx, ty, the centre shift in units of the anchor's size:
+            #               (g_cx - a_cx) / a_w and (g_cy - a_cy) / a_h -> (N,) each
+            # 3. YOUR CODE: tw, th, the log of the size ratio: log(g_w / a_w) and log(g_h / a_h) -> (N,) each
+            # 4. YOUR CODE: put the columns tx, ty, tw, th together with np.stack([...], -1) -> (N, 4); return it
             raise NotImplementedError
 
         def decode(deltas, anchors):
-            a = boxes.xyxy_to_cxcywh(anchors)
-            # YOUR CODE HERE -> (N, 4) xyxy
+            '''deltas (N, 4) = (tx, ty, tw, th), anchors (N, 4) xyxy -> boxes (N, 4) xyxy; the inverse of encode.'''
+            # 1. the anchors in cxcywh
+            a = boxes.xyxy_to_cxcywh(anchors)                # (N, 4)
+            # 2. YOUR CODE: cx, cy, the centre: the anchor's centre plus tx (ty) times the anchor's width (height)
+            # 3. YOUR CODE: w, h, the size: the anchor's width (height) times exp(tw) (exp(th))
+            # 4. YOUR CODE: stack cx, cy, w, h -> (N, 4), convert with boxes.cxcywh_to_xyxy and return it
             raise NotImplementedError
 
         tests.check_encode_decode(encode, decode)
         """,
         solution=r"""
         def encode(gt, anchors):
-            g, a = boxes.xyxy_to_cxcywh(gt), boxes.xyxy_to_cxcywh(anchors)
-            return np.stack([(g[:, 0] - a[:, 0]) / a[:, 2], (g[:, 1] - a[:, 1]) / a[:, 3],
-                             np.log(g[:, 2] / a[:, 2]), np.log(g[:, 3] / a[:, 3])], -1)
+            '''gt, anchors: (N, 4) xyxy, aligned (gt[n] belongs to anchors[n]) -> deltas (N, 4) = (tx, ty, tw, th).'''
+            # 1. both in cxcywh: columns 0, 1, 2, 3 are cx, cy, w, h
+            g = boxes.xyxy_to_cxcywh(gt)                     # (N, 4)
+            a = boxes.xyxy_to_cxcywh(anchors)                # (N, 4)
+            # 2. tx, ty, the centre shift in units of the anchor's size
+            tx = (g[:, 0] - a[:, 0]) / a[:, 2]               # (N,)
+            ty = (g[:, 1] - a[:, 1]) / a[:, 3]               # (N,)
+            # 3. tw, th, the log of the size ratio
+            tw = np.log(g[:, 2] / a[:, 2])                   # (N,)
+            th = np.log(g[:, 3] / a[:, 3])                   # (N,)
+            # 4. put the columns together
+            return np.stack([tx, ty, tw, th], -1)            # (N, 4)
 
         def decode(deltas, anchors):
-            a = boxes.xyxy_to_cxcywh(anchors)
-            cx = a[:, 0] + deltas[:, 0] * a[:, 2]
-            cy = a[:, 1] + deltas[:, 1] * a[:, 3]
-            w = a[:, 2] * np.exp(deltas[:, 2])
-            h = a[:, 3] * np.exp(deltas[:, 3])
-            return boxes.cxcywh_to_xyxy(np.stack([cx, cy, w, h], -1))
+            '''deltas (N, 4) = (tx, ty, tw, th), anchors (N, 4) xyxy -> boxes (N, 4) xyxy; the inverse of encode.'''
+            # 1. the anchors in cxcywh
+            a = boxes.xyxy_to_cxcywh(anchors)                # (N, 4)
+            # 2. cx, cy, the centre: the anchor's centre plus tx (ty) times the anchor's width (height)
+            cx = a[:, 0] + deltas[:, 0] * a[:, 2]            # (N,)
+            cy = a[:, 1] + deltas[:, 1] * a[:, 3]            # (N,)
+            # 3. w, h, the size: the anchor's width (height) times exp(tw) (exp(th))
+            w = a[:, 2] * np.exp(deltas[:, 2])               # (N,)
+            h = a[:, 3] * np.exp(deltas[:, 3])               # (N,)
+            # 4. stack and convert back to xyxy
+            boxes_cxcywh = np.stack([cx, cy, w, h], -1)      # (N, 4)
+            return boxes.cxcywh_to_xyxy(boxes_cxcywh)        # (N, 4)
 
         tests.check_encode_decode(encode, decode)
         """),
+    api("np.allclose"),
+    api("np.where", "np.linspace", "np.abs", brief=True),
     code(r"""
     k = np.where(lab == 1)[0][len(np.where(lab == 1)[0]) // 3]
     a, g = anchors[k], m_gt[idx[k]]
@@ -415,31 +500,51 @@ CELLS = [
     `RPNHead(in_channels, num_anchors)`; `forward(x)` returns `(objectness, deltas)` with shapes
     `(N, A, H, W)` and `(N, 4A, H, W)`. Name the layers `conv`, `cls_logits`, `bbox_pred` (like torchvision).
     """),
+    api("nn.Conv2d", "F.relu", brief=True),
     exercise(
         stub=r"""
         class RPNHead(nn.Module):
+            '''RPNHead(C, A): input feature map x (N, C, H, W) ->
+            (objectness logits (N, A, H, W), box deltas (N, 4A, H, W)): A scores and 4A deltas at every cell.'''
             def __init__(self, in_channels, num_anchors):
                 super().__init__()
-                # YOUR CODE HERE: self.conv (3x3, padding 1), self.cls_logits (1x1), self.bbox_pred (1x1)
+                # 1. YOUR CODE: self.conv, a 3x3 convolution from in_channels to in_channels, padding=1 (same size)
+                # 2. YOUR CODE: self.cls_logits, a 1x1 convolution from in_channels to num_anchors (one score per anchor)
+                # 3. YOUR CODE: self.bbox_pred, a 1x1 convolution from in_channels to 4 * num_anchors (4 deltas per anchor)
                 raise NotImplementedError
 
             def forward(self, x):
-                # YOUR CODE HERE
+                # 4. YOUR CODE: h, the shared features: self.conv, then F.relu -> (N, C, H, W)
+                # 5. YOUR CODE: objectness = self.cls_logits(h) -> (N, A, H, W)
+                # 6. YOUR CODE: deltas = self.bbox_pred(h) -> (N, 4A, H, W)
+                # 7. YOUR CODE: return objectness, deltas
                 raise NotImplementedError
 
         tests.check_rpn_head(RPNHead)
         """,
         solution=r"""
         class RPNHead(nn.Module):
+            '''RPNHead(C, A): input feature map x (N, C, H, W) ->
+            (objectness logits (N, A, H, W), box deltas (N, 4A, H, W)): A scores and 4A deltas at every cell.'''
             def __init__(self, in_channels, num_anchors):
                 super().__init__()
+                # 1. self.conv, a 3x3 convolution from in_channels to in_channels, padding=1 (same size)
                 self.conv = nn.Conv2d(in_channels, in_channels, 3, padding=1)
+                # 2. self.cls_logits, a 1x1 convolution from in_channels to num_anchors (one score per anchor)
                 self.cls_logits = nn.Conv2d(in_channels, num_anchors, 1)
+                # 3. self.bbox_pred, a 1x1 convolution from in_channels to 4 * num_anchors (4 deltas per anchor)
                 self.bbox_pred = nn.Conv2d(in_channels, 4 * num_anchors, 1)
 
             def forward(self, x):
-                h = F.relu(self.conv(x))
-                return self.cls_logits(h), self.bbox_pred(h)
+                # 4. h, the shared features
+                h = self.conv(x)
+                h = F.relu(h)                                # (N, C, H, W)
+                # 5. one objectness logit per anchor and cell
+                objectness = self.cls_logits(h)              # (N, A, H, W)
+                # 6. four deltas per anchor and cell
+                deltas = self.bbox_pred(h)                   # (N, 4A, H, W)
+                # 7. both outputs
+                return objectness, deltas
 
         tests.check_rpn_head(RPNHead)
         """),
@@ -452,6 +557,8 @@ CELLS = [
     anchors per image (<= 25% positives), and the loss is BCE on the sampled anchors' objectness +
     smooth-L1 on the positive anchors' deltas: exactly Faster R-CNN's RPN loss.
     """),
+    api("torch.sigmoid"),
+    api("Module.state_dict", "Module.load_state_dict", "Tensor.float", "torch.no_grad", "Tensor.view", brief=True),
     code(r"""
     head_cls = RPNHead if tests.check_rpn_head(RPNHead, verbose=False) else day2.RPNHead
     print("using", "your RPNHead" if head_cls is RPNHead else "the reference day2.RPNHead")
@@ -505,6 +612,7 @@ CELLS = [
     3. keep the top-k by objectness *per level* (2000 train / 1000 test); 4. NMS at IoU 0.7;
     5. keep the top-N (2000 train / 1000 test). The second stage only ever sees these.
     """),
+    api("Tensor.argsort", brief=True),
     code(r"""
     i = 3
     _, _, steps = day2.rpn_proposals(rpn, X_va[i], pre_nms_top_n=100, post_nms_top_n=12, nms_iou=0.5, return_steps=True)
@@ -535,6 +643,8 @@ CELLS = [
     bin gets a few regularly spaced **sampling points** (2 x 2), the feature value at each point is
     obtained by **bilinear interpolation** of its 4 neighbouring cells, and the samples are averaged.
     """),
+    api("torchvision.ops.roi_align", "np.add.outer", "np.sin", "np.cos"),
+    api("torch.tensor", brief=True),
     code(r"""
     fmap = torch.tensor(np.add.outer(np.arange(8), np.arange(8)) % 5 + np.random.default_rng(0).uniform(0, 1, (8, 8)), dtype=torch.float32)[None]
     roi = np.array([1.3, 1.7, 6.1, 5.6])              # in feature-map coordinates (stride 1 for the drawing)
@@ -598,28 +708,57 @@ CELLS = [
     "-0.5 -> index" line, then four neighbours times their weights. The checker compares with
     `torchvision.ops.roi_align`.
     """),
+    api("Tensor.floor", "Tensor.long", "Tensor.new_zeros", "torch.meshgrid", title="Functions you will need"),
+    api("Tensor.clamp", "Tensor.tolist", "torch.arange", brief=True),
     exercise(
         stub=r"""
         def bilinear(feature, y, x):
+            '''feature (C, H, W); y, x: float tensors of one same shape S (row and column of each point) ->
+            (C, *S): the feature map interpolated at every point (y, x).'''
             C, H, W = feature.shape
-            y = y.clamp(0, H - 1); x = x.clamp(0, W - 1)
-            y0 = y.floor().long(); x0 = x.floor().long()
-            y1 = (y0 + 1).clamp(max=H - 1); x1 = (x0 + 1).clamp(max=W - 1)
-            ly, lx = y - y0, x - x0                     # fractional parts in [0, 1)
-            # YOUR CODE HERE: weighted sum of feature[:, y0, x0], [:, y0, x1], [:, y1, x0], [:, y1, x1]
+            # 1. keep the points inside the map
+            y = y.clamp(0, H - 1)
+            x = x.clamp(0, W - 1)
+            # 2. the four neighbouring cells of every point: rows y0 (above) and y1 (below),
+            #    columns x0 (left) and x1 (right), as integer indices
+            y0 = y.floor().long()
+            x0 = x.floor().long()
+            y1 = (y0 + 1).clamp(max=H - 1)
+            x1 = (x0 + 1).clamp(max=W - 1)
+            ly = y - y0                                  # in [0, 1): how far the point lies below row y0
+            lx = x - x0                                  # in [0, 1): how far it lies right of column x0
+            # 3. YOUR CODE: top_left, feature[:, y0, x0] times its weight (1 - ly) * (1 - lx) -> (C, *S)
+            # 4. YOUR CODE: top_right, feature[:, y0, x1] times (1 - ly) * lx
+            # 5. YOUR CODE: bottom_left, feature[:, y1, x0] times ly * (1 - lx)
+            # 6. YOUR CODE: bottom_right, feature[:, y1, x1] times ly * lx
+            # 7. YOUR CODE: return the sum of the four (the four weights add up to 1)
             raise NotImplementedError
 
         def roi_align(feature, rois, output_size=7, spatial_scale=1.0, sampling_ratio=2):
-            C = feature.shape[0]; P, s = output_size, sampling_ratio
-            out = feature.new_zeros((len(rois), C, P, P))
+            '''feature (C, H, W), rois (K, 4) xyxy in image pixels -> (K, C, P, P), P = output_size:
+            a P x P tile for every RoI, each bin the mean of sampling_ratio x sampling_ratio bilinear samples.'''
+            C = feature.shape[0]
+            P = output_size                                  # bins per side
+            s = sampling_ratio                               # samples per bin and side
+            out = feature.new_zeros((len(rois), C, P, P))    # (K, C, P, P), zeros of the same dtype as feature
             for k, box in enumerate(rois):
+                # 1. the box in feature-map coordinates, shifted by -0.5 (aligned: pixel centres)
                 x1, y1, x2, y2 = (box * spatial_scale - 0.5).tolist()
-                bw, bh = (x2 - x1) / P, (y2 - y1) / P
-                # YOUR CODE HERE:
-                # offsets of the s samples inside a bin: (arange(s) + 0.5) / s
-                # ys = y1 + (arange(P)[:, None] + offsets[None]) * bh  -> flatten to (P*s,); same for xs
-                # grid: yy (P*s, P*s), xx (P*s, P*s); vals = bilinear(feature, yy, xx) -> (C, P*s, P*s)
-                # out[k] = vals.reshape(C, P, s, P, s).mean((2, 4))
+                bw = (x2 - x1) / P                           # width of one bin, in feature cells
+                bh = (y2 - y1) / P                           # height of one bin
+                # 2. where the s samples sit inside one bin, as a fraction of the bin: e.g. [0.25, 0.75] for s = 2
+                offsets = (torch.arange(s, dtype=feature.dtype) + 0.5) / s     # (s,)
+                bins = torch.arange(P, dtype=feature.dtype)                    # (P,) bin numbers 0 .. P-1
+                # 3. YOUR CODE: ys, the P*s sample rows: y1 + (bin number + offset) * bh, for every bin and
+                #               every offset: broadcast bins[:, None] against offsets[None, :] -> (P, s),
+                #               then reshape(-1) -> (P*s,)
+                # 4. YOUR CODE: xs, the P*s sample columns, the same with x1 and bw -> (P*s,)
+                # 5. YOUR CODE: yy, xx, the full grid of sample points: torch.meshgrid(ys, xs, indexing="ij")
+                #               -> (P*s, P*s) each
+                # 6. YOUR CODE: vals, the feature at every sample point: bilinear(feature, yy, xx) -> (C, P*s, P*s)
+                # 7. YOUR CODE: for every bin (i, j), i, j = 0 .. P-1: its s x s samples are
+                #               vals[:, i*s:(i+1)*s, j*s:(j+1)*s] -> (C, s, s); out[k, :, i, j] = their mean over the
+                #               last two axes -> (C,)
                 raise NotImplementedError
             return out
 
@@ -627,26 +766,58 @@ CELLS = [
         """,
         solution=r"""
         def bilinear(feature, y, x):
+            '''feature (C, H, W); y, x: float tensors of one same shape S (row and column of each point) ->
+            (C, *S): the feature map interpolated at every point (y, x).'''
             C, H, W = feature.shape
-            y = y.clamp(0, H - 1); x = x.clamp(0, W - 1)
-            y0 = y.floor().long(); x0 = x.floor().long()
-            y1 = (y0 + 1).clamp(max=H - 1); x1 = (x0 + 1).clamp(max=W - 1)
-            ly, lx = y - y0, x - x0                     # fractional parts in [0, 1)
-            return (feature[:, y0, x0] * (1 - ly) * (1 - lx) + feature[:, y0, x1] * (1 - ly) * lx +
-                    feature[:, y1, x0] * ly * (1 - lx) + feature[:, y1, x1] * ly * lx)
+            # 1. keep the points inside the map
+            y = y.clamp(0, H - 1)
+            x = x.clamp(0, W - 1)
+            # 2. the four neighbouring cells of every point: rows y0 (above) and y1 (below),
+            #    columns x0 (left) and x1 (right), as integer indices
+            y0 = y.floor().long()
+            x0 = x.floor().long()
+            y1 = (y0 + 1).clamp(max=H - 1)
+            x1 = (x0 + 1).clamp(max=W - 1)
+            ly = y - y0                                  # in [0, 1): how far the point lies below row y0
+            lx = x - x0                                  # in [0, 1): how far it lies right of column x0
+            # 3. - 6. every neighbour times its weight: the closer the point, the larger the weight
+            top_left = feature[:, y0, x0] * (1 - ly) * (1 - lx)        # (C, *S)
+            top_right = feature[:, y0, x1] * (1 - ly) * lx             # (C, *S)
+            bottom_left = feature[:, y1, x0] * ly * (1 - lx)           # (C, *S)
+            bottom_right = feature[:, y1, x1] * ly * lx                # (C, *S)
+            # 7. their sum (the four weights add up to 1)
+            return top_left + top_right + bottom_left + bottom_right
 
         def roi_align(feature, rois, output_size=7, spatial_scale=1.0, sampling_ratio=2):
-            C = feature.shape[0]; P, s = output_size, sampling_ratio
-            out = feature.new_zeros((len(rois), C, P, P))
+            '''feature (C, H, W), rois (K, 4) xyxy in image pixels -> (K, C, P, P), P = output_size:
+            a P x P tile for every RoI, each bin the mean of sampling_ratio x sampling_ratio bilinear samples.'''
+            C = feature.shape[0]
+            P = output_size                                  # bins per side
+            s = sampling_ratio                               # samples per bin and side
+            out = feature.new_zeros((len(rois), C, P, P))    # (K, C, P, P), zeros of the same dtype as feature
             for k, box in enumerate(rois):
+                # 1. the box in feature-map coordinates, shifted by -0.5 (aligned: pixel centres)
                 x1, y1, x2, y2 = (box * spatial_scale - 0.5).tolist()
-                bw, bh = (x2 - x1) / P, (y2 - y1) / P
-                offs = (torch.arange(s, dtype=feature.dtype) + 0.5) / s
-                ys = (y1 + (torch.arange(P, dtype=feature.dtype)[:, None] + offs[None]) * bh).reshape(-1)
-                xs = (x1 + (torch.arange(P, dtype=feature.dtype)[:, None] + offs[None]) * bw).reshape(-1)
-                yy, xx = torch.meshgrid(ys, xs, indexing="ij")
-                vals = bilinear(feature, yy, xx)
-                out[k] = vals.reshape(C, P, s, P, s).mean((2, 4))
+                bw = (x2 - x1) / P                           # width of one bin, in feature cells
+                bh = (y2 - y1) / P                           # height of one bin
+                # 2. where the s samples sit inside one bin, as a fraction of the bin: e.g. [0.25, 0.75] for s = 2
+                offsets = (torch.arange(s, dtype=feature.dtype) + 0.5) / s     # (s,)
+                bins = torch.arange(P, dtype=feature.dtype)                    # (P,) bin numbers 0 .. P-1
+                # 3. ys, the P*s sample rows: row i of the (P, s) array holds the s samples of bin row i
+                ys = y1 + (bins[:, None] + offsets[None, :]) * bh              # (P, 1) + (1, s) -> (P, s)
+                ys = ys.reshape(-1)                                            # (P*s,)
+                # 4. xs, the P*s sample columns
+                xs = x1 + (bins[:, None] + offsets[None, :]) * bw              # (P, s)
+                xs = xs.reshape(-1)                                            # (P*s,)
+                # 5. the full grid of sample points
+                yy, xx = torch.meshgrid(ys, xs, indexing="ij")                 # (P*s, P*s) each
+                # 6. the feature at every sample point
+                vals = bilinear(feature, yy, xx)                               # (C, P*s, P*s)
+                # 7. every bin is the mean of its s x s samples
+                for i in range(P):
+                    for j in range(P):
+                        bin_samples = vals[:, i * s:(i + 1) * s, j * s:(j + 1) * s]   # (C, s, s)
+                        out[k, :, i, j] = bin_samples.mean((1, 2))                    # (C,)
             return out
 
         tests.check_roi_align(roi_align)
@@ -705,6 +876,8 @@ CELLS = [
     Before training anything: the COCO model already detects people (COCO class 1 = person, and
     torchvision also uses label 1 for "person" in our dataset). How good is it out of the box?
     """),
+    api("torchvision.models.detection.fasterrcnn_resnet50_fpn_v2"),
+    api("Module.eval", brief=True),
     code(r"""
     from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2
     from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
@@ -723,11 +896,16 @@ CELLS = [
     `cls_score` and `bbox_pred` linear layers. Replace it with a fresh one for **2 classes**
     (background + person). Everything else keeps its COCO weights.
     """),
+    api("torchvision.models.detection.faster_rcnn.FastRCNNPredictor", title="Functions you will need"),
     exercise(
         stub=r"""
         torch.manual_seed(0)
         model = fasterrcnn_resnet50_fpn_v2(weights="DEFAULT", **FAST)
-        # YOUR CODE HERE (2 lines): read in_features from the old predictor, install a new one
+        # 1. the old predictor (COCO: 91 classes) and the number of features its cls_score layer reads
+        old_predictor = model.roi_heads.box_predictor
+        # 2. YOUR CODE: in_features, the input size of old_predictor.cls_score (a Linear layer: .in_features)
+        # 3. YOUR CODE: install a new FastRCNNPredictor(in_features, 2) as model.roi_heads.box_predictor
+        #               (2 classes: background + person)
         raise NotImplementedError
 
         tests.check_box_predictor(model, num_classes=2)
@@ -735,16 +913,25 @@ CELLS = [
         solution=r"""
         torch.manual_seed(0)
         model = fasterrcnn_resnet50_fpn_v2(weights="DEFAULT", **FAST)
-        in_features = model.roi_heads.box_predictor.cls_score.in_features      # 1024
+        # 1. the old predictor (COCO: 91 classes) and the number of features its cls_score layer reads
+        old_predictor = model.roi_heads.box_predictor
+        # 2. in_features, the input size of old_predictor.cls_score
+        in_features = old_predictor.cls_score.in_features                       # 1024
+        # 3. install a new predictor for 2 classes: background + person
         model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 2)
 
         tests.check_box_predictor(model, num_classes=2)
         """),
+    api("np.convolve"),
+    api("torchkit.count_parameters", "np.ones", brief=True),
     code(r"""
     print(f"parameters: {torchkit.count_parameters(model) / 1e6:.1f} M")
-    history = day2.load_or_train(
-        model, "d2_02_frcnn_pennfudan.pt",
-        lambda: day2.train_detector(model, pf_train, epochs=2, batch_size=2, lr=0.01, max_minutes=3, log_every=5))
+
+    def train():
+        # only called when there is no saved checkpoint yet
+        return day2.train_detector(model, pf_train, epochs=2, batch_size=2, lr=0.01, max_minutes=3, log_every=5)
+
+    history = day2.load_or_train(model, "d2_02_frcnn_pennfudan.pt", train)
     model.eval()
     if history:
         keys = ["loss_objectness", "loss_rpn_box_reg", "loss_classifier", "loss_box_reg"]

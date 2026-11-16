@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D3-02-unet"
 
@@ -28,6 +28,7 @@ CELLS = [
     md(r"""
     ## 0 · Setup
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", brief=True),
     code("""
     import sys, pathlib
     for p in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:   # find the cvcourse package
@@ -96,14 +97,28 @@ CELLS = [
     exercise(
         stub="""
         def unet_shapes(input_size, depth, base):
-            # YOUR CODE HERE (1-2 lines)
-            raise NotImplementedError
+            '''input_size (px), depth (number of poolings), base (channels of level 0) ->
+            a list of depth + 1 tuples (channels, size): the encoder levels 0 .. depth-1, then the bottleneck.'''
+            schedule = []
+            for i in range(depth + 1):                     # level i; the last one (i = depth) is the bottleneck
+                # YOUR CODE: channels = base * 2 ** i (they double at every level)
+                # YOUR CODE: size = input_size // 2 ** i (the side halves; integer division, as max-pooling floors)
+                # YOUR CODE: append the tuple (channels, size) to schedule
+                raise NotImplementedError
+            return schedule
 
         tests.check_unet_shapes(unet_shapes)
         """,
         solution="""
         def unet_shapes(input_size, depth, base):
-            return [(base * 2 ** i, input_size // 2 ** i) for i in range(depth + 1)]
+            '''input_size (px), depth (number of poolings), base (channels of level 0) ->
+            a list of depth + 1 tuples (channels, size): the encoder levels 0 .. depth-1, then the bottleneck.'''
+            schedule = []
+            for i in range(depth + 1):                     # level i; the last one (i = depth) is the bottleneck
+                channels = base * 2 ** i                   # the channels double at every level
+                size = input_size // 2 ** i                # the side halves (max-pooling floors)
+                schedule.append((channels, size))
+            return schedule
 
         tests.check_unet_shapes(unet_shapes)
         """),
@@ -131,56 +146,85 @@ CELLS = [
       axis**, then `double_conv(out_ch + skip_ch, out_ch)`. With `use_skip=False` the
       concatenation is skipped (the ablation in section 4) and the conv takes `out_ch` channels.
     """),
+    api("nn.MaxPool2d", "nn.ConvTranspose2d", "torch.cat", brief=True, title="Functions you will need"),
     exercise(
         stub="""
         class EncoderBlock(nn.Module):
+            '''EncoderBlock(in_ch, out_ch): forward(x (N, in_ch, H, W)) -> (pooled (N, out_ch, H/2, W/2), skip (N, out_ch, H, W)).'''
             def __init__(self, in_ch, out_ch):
                 super().__init__()
-                # YOUR CODE HERE: self.conv (double_conv) and self.pool (2x2 max-pool)
+                # 1. YOUR CODE: self.conv = day3.double_conv(in_ch, out_ch)
+                # 2. YOUR CODE: self.pool, a 2x2 max-pool (nn.MaxPool2d(2))
                 raise NotImplementedError
 
             def forward(self, x):                      # x: (N, in_ch, H, W)
-                # YOUR CODE HERE: return pooled (N, out_ch, H/2, W/2), skip (N, out_ch, H, W)
+                # 3. YOUR CODE: skip = self.conv(x) -> (N, out_ch, H, W), kept for the decoder
+                # 4. YOUR CODE: pooled = self.pool(skip) -> (N, out_ch, H/2, W/2), goes down to the next level
+                # 5. YOUR CODE: return pooled, skip
                 raise NotImplementedError
 
 
         class DecoderBlock(nn.Module):
+            '''DecoderBlock(in_ch, skip_ch, out_ch): forward(x (N, in_ch, h, w), skip (N, skip_ch, 2h, 2w)) -> (N, out_ch, 2h, 2w).'''
             def __init__(self, in_ch, skip_ch, out_ch, use_skip=True):
                 super().__init__()
                 self.use_skip = use_skip
-                # YOUR CODE HERE: self.up (2x2 transposed conv, stride 2) and self.conv (double_conv)
+                # 1. YOUR CODE: self.up, a 2x2 transposed conv with stride 2 from in_ch to out_ch (doubles the size)
+                # 2. YOUR CODE: conv_in, the channels after the concatenation: out_ch + skip_ch with the skip,
+                #               out_ch without it (if use_skip: ... else: ...)
+                # 3. YOUR CODE: self.conv = day3.double_conv(conv_in, out_ch)
                 raise NotImplementedError
 
             def forward(self, x, skip=None):           # x: (N, in_ch, h, w), skip: (N, skip_ch, 2h, 2w)
-                # YOUR CODE HERE: upsample, concatenate the skip (if used), double conv
+                # 4. YOUR CODE: x = self.up(x) -> (N, out_ch, 2h, 2w)
+                # 5. YOUR CODE: if self.use_skip: x = torch.cat([x, skip], dim=1) -> (N, out_ch + skip_ch, 2h, 2w)
+                # 6. YOUR CODE: return self.conv(x) -> (N, out_ch, 2h, 2w)
                 raise NotImplementedError
 
         tests.check_unet_blocks(EncoderBlock, DecoderBlock)
         """,
         solution="""
         class EncoderBlock(nn.Module):
+            '''EncoderBlock(in_ch, out_ch): forward(x (N, in_ch, H, W)) -> (pooled (N, out_ch, H/2, W/2), skip (N, out_ch, H, W)).'''
             def __init__(self, in_ch, out_ch):
                 super().__init__()
+                # 1. two 3x3 conv-BN-ReLU
                 self.conv = day3.double_conv(in_ch, out_ch)
+                # 2. 2x2 max-pool
                 self.pool = nn.MaxPool2d(2)
 
             def forward(self, x):                      # x: (N, in_ch, H, W)
-                skip = self.conv(x)
-                return self.pool(skip), skip
+                # 3. full resolution, kept for the decoder
+                skip = self.conv(x)                    # (N, out_ch, H, W)
+                # 4. half resolution, goes down to the next level
+                pooled = self.pool(skip)               # (N, out_ch, H/2, W/2)
+                # 5. both
+                return pooled, skip
 
 
         class DecoderBlock(nn.Module):
+            '''DecoderBlock(in_ch, skip_ch, out_ch): forward(x (N, in_ch, h, w), skip (N, skip_ch, 2h, 2w)) -> (N, out_ch, 2h, 2w).'''
             def __init__(self, in_ch, skip_ch, out_ch, use_skip=True):
                 super().__init__()
                 self.use_skip = use_skip
+                # 1. x2 upsampling, in_ch -> out_ch
                 self.up = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2)
-                self.conv = day3.double_conv(out_ch + (skip_ch if use_skip else 0), out_ch)
+                # 2. the channels after the concatenation
+                if use_skip:
+                    conv_in = out_ch + skip_ch
+                else:
+                    conv_in = out_ch
+                # 3. two 3x3 conv-BN-ReLU
+                self.conv = day3.double_conv(conv_in, out_ch)
 
             def forward(self, x, skip=None):           # x: (N, in_ch, h, w), skip: (N, skip_ch, 2h, 2w)
-                x = self.up(x)
+                # 4. upsample
+                x = self.up(x)                         # (N, out_ch, 2h, 2w)
+                # 5. glue the skip to it, on the channel axis
                 if self.use_skip:
-                    x = torch.cat([x, skip], dim=1)
-                return self.conv(x)
+                    x = torch.cat([x, skip], dim=1)    # (N, out_ch + skip_ch, 2h, 2w)
+                # 6. mix them
+                return self.conv(x)                    # (N, out_ch, 2h, 2w)
 
         tests.check_unet_blocks(EncoderBlock, DecoderBlock)
         """),
@@ -192,44 +236,74 @@ CELLS = [
     head. Keep the skips in a list on the way down and walk it backwards on the way up.
     `forward(x)` takes `(N, in_ch, H, W)` and returns logits `(N, num_classes, H, W)`.
     """),
+    api("nn.ModuleList", "nn.Conv2d", "torchkit.summarize", brief=True),
     exercise(
         stub="""
         class UNet(nn.Module):
+            '''UNet(in_ch, num_classes, base, depth): forward(x (N, in_ch, H, W)) -> logits (N, num_classes, H, W);
+            H and W must be divisible by 2 ** depth.'''
             def __init__(self, in_ch=3, num_classes=4, base=16, depth=4, use_skips=True):
                 super().__init__()
-                chs = [base * 2 ** i for i in range(depth)]          # e.g. [16, 32, 64, 128]
-                # YOUR CODE HERE: self.encoders (nn.ModuleList), self.bottleneck, self.decoders (nn.ModuleList), self.head
+                # 1. the channels of the encoder levels, e.g. [16, 32, 64, 128]
+                chs = []
+                for i in range(depth):
+                    chs.append(base * 2 ** i)
+                # 2. YOUR CODE: self.encoders = nn.ModuleList(); c_prev = in_ch; for every c in chs: append
+                #               EncoderBlock(c_prev, c), then c_prev = c
+                # 3. YOUR CODE: self.bottleneck = day3.double_conv(chs[-1], chs[-1] * 2)
+                # 4. YOUR CODE: self.decoders = nn.ModuleList(); for every c in reversed(chs) (128, 64, 32, 16):
+                #               append DecoderBlock(c * 2, c, c, use_skips)
+                # 5. YOUR CODE: self.head, a 1x1 conv from base to num_classes channels
                 raise NotImplementedError
 
             def forward(self, x):
-                # YOUR CODE HERE
+                # 6. YOUR CODE: down: skips = []; for every encoder: x, skip = encoder(x); append skip to skips
+                # 7. YOUR CODE: x = self.bottleneck(x)
+                # 8. YOUR CODE: up: for decoder, skip in zip(self.decoders, reversed(skips)): x = decoder(x, skip)
+                #               (the coarsest skip goes to the first decoder)
+                # 9. YOUR CODE: return self.head(x) -> (N, num_classes, H, W)
                 raise NotImplementedError
 
         tests.check_unet_forward(UNet)
         """,
         solution="""
         class UNet(nn.Module):
+            '''UNet(in_ch, num_classes, base, depth): forward(x (N, in_ch, H, W)) -> logits (N, num_classes, H, W);
+            H and W must be divisible by 2 ** depth.'''
             def __init__(self, in_ch=3, num_classes=4, base=16, depth=4, use_skips=True):
                 super().__init__()
-                chs = [base * 2 ** i for i in range(depth)]          # e.g. [16, 32, 64, 128]
+                # 1. the channels of the encoder levels, e.g. [16, 32, 64, 128]
+                chs = []
+                for i in range(depth):
+                    chs.append(base * 2 ** i)
+                # 2. the encoders, finest first
                 self.encoders = nn.ModuleList()
                 c_prev = in_ch
                 for c in chs:
                     self.encoders.append(EncoderBlock(c_prev, c))
                     c_prev = c
+                # 3. the bottleneck doubles the channels once more
                 self.bottleneck = day3.double_conv(chs[-1], chs[-1] * 2)
-                self.decoders = nn.ModuleList([DecoderBlock(c * 2, c, c, use_skips) for c in reversed(chs)])
+                # 4. the decoders, coarsest first
+                self.decoders = nn.ModuleList()
+                for c in reversed(chs):                          # 128, 64, 32, 16
+                    self.decoders.append(DecoderBlock(c * 2, c, c, use_skips))
+                # 5. one logit per class and pixel
                 self.head = nn.Conv2d(base, num_classes, kernel_size=1)
 
             def forward(self, x):
+                # 6. down: keep every skip
                 skips = []
-                for enc in self.encoders:
-                    x, s = enc(x)
-                    skips.append(s)
+                for encoder in self.encoders:
+                    x, skip = encoder(x)                         # x: half the size; skip: full size
+                    skips.append(skip)
+                # 7. the bottleneck
                 x = self.bottleneck(x)
-                for dec, s in zip(self.decoders, reversed(skips)):
-                    x = dec(x, s)
-                return self.head(x)
+                # 8. up: the coarsest skip goes to the first decoder
+                for decoder, skip in zip(self.decoders, reversed(skips)):
+                    x = decoder(x, skip)                         # twice the size
+                # 9. the logits
+                return self.head(x)                              # (N, num_classes, H, W)
 
         tests.check_unet_forward(UNet)
         """),
@@ -258,22 +332,36 @@ CELLS = [
     `bce_weight * BCEWithLogits + (1 - bce_weight) * soft Dice of sigmoid(logits)`, with the
     soft Dice of D3-01 (`eps = 1e-6`, over the whole batch).
     """),
+    api("F.binary_cross_entropy_with_logits", "torch.sigmoid", "Tensor.float", "Tensor.sum", brief=True,
+        title="Functions you will need"),
     exercise(
         stub="""
         def bce_dice_loss(logits, target, bce_weight=0.5):
+            '''logits, target (0 / 1): same shape, one channel -> bce_weight * BCE + (1 - bce_weight) * soft Dice loss, a 0-d tensor.'''
             target = target.float()
-            # YOUR CODE HERE (3-4 lines)
+            # 1. YOUR CODE: bce = F.binary_cross_entropy_with_logits(logits, target)
+            # 2. YOUR CODE: p, the probabilities: torch.sigmoid(logits)
+            # 3. YOUR CODE: inter, the soft intersection: the sum of p * target
+            # 4. YOUR CODE: dice_loss = 1 - (2 * inter + 1e-6) / (p.sum() + target.sum() + 1e-6)  (as in D3-01)
+            # 5. YOUR CODE: return bce_weight * bce + (1 - bce_weight) * dice_loss
             raise NotImplementedError
 
         tests.check_bce_dice(bce_dice_loss)
         """,
         solution="""
         def bce_dice_loss(logits, target, bce_weight=0.5):
+            '''logits, target (0 / 1): same shape, one channel -> bce_weight * BCE + (1 - bce_weight) * soft Dice loss, a 0-d tensor.'''
             target = target.float()
+            # 1. BCE on the logits (stable)
             bce = F.binary_cross_entropy_with_logits(logits, target)
+            # 2. the probabilities
             p = torch.sigmoid(logits)
-            dice = 1 - (2 * (p * target).sum() + 1e-6) / (p.sum() + target.sum() + 1e-6)
-            return bce_weight * bce + (1 - bce_weight) * dice
+            # 3. the soft intersection
+            inter = (p * target).sum()
+            # 4. the soft Dice loss of D3-01
+            dice_loss = 1 - (2 * inter + 1e-6) / (p.sum() + target.sum() + 1e-6)
+            # 5. the weighted sum
+            return bce_weight * bce + (1 - bce_weight) * dice_loss
 
         tests.check_bce_dice(bce_dice_loss)
         """),
@@ -291,6 +379,8 @@ CELLS = [
     exactly what the skip connections are for. If your `UNet` did not pass the checker, use
     `UNet = day3.UNet`.
     """),
+    api("torchkit.ShapesDataset", "torch.utils.data.DataLoader", "Tensor.unique", "Tensor.tolist", "Tensor.to",
+        "torch.optim.AdamW", "Module.parameters", "torchkit.count_parameters", "np.round", brief=True),
     code("""
     kw = dict(min_r=5, max_r=14)                       # object radius for 64 px images
     shp_tr = torchkit.ShapesDataset(1200, 64, seed=0, task="segmentation", **kw)
@@ -317,12 +407,18 @@ CELLS = [
     > without skips well below that, with the circles and triangles hit hardest. On a GPU
     > both runs take a few seconds per epoch.
     """),
+    api("torch.no_grad", "Module.eval", "Tensor.argmax", "Tensor.cpu", "Tensor.permute", "Tensor.numpy", "np.arange",
+        "np.nan_to_num", "np.convolve", "np.ones", brief=True),
     code("""
     fig = plt.figure(figsize=(16, 7.5))
     gs = fig.add_gridspec(4, 6, width_ratios=[1, 1, 1, 1, 0.15, 2.6])
     xv, yv = next(iter(DataLoader(shp_va, batch_size=4)))
+    preds = {}                                          # "with skips" / "without skips" -> predicted classes (4, 64, 64)
     with torch.no_grad():
-        preds = {k: r["model"].eval()(xv.to(device)).argmax(1).cpu() for k, r in results.items()}
+        for name, r in results.items():
+            model = r["model"].eval()
+            logits = model(xv.to(device))               # (4, 4 classes, 64, 64)
+            preds[name] = logits.argmax(1).cpu()        # the most likely class of every pixel
     for i in range(4):
         row = [xv[i].permute(1, 2, 0).numpy(), day3.colorize(yv[i]), day3.colorize(preds["with skips"][i]),
                day3.colorize(preds["without skips"][i])]
@@ -358,11 +454,17 @@ CELLS = [
     skip, `layer1..layer3` give stride 4/8/16 skips and `layer4` (stride 32) is the
     bottleneck. The decoder reuses the `DecoderBlock` from `day3`. Read it:
     """),
+    api("Tensor.numel", "torch.zeros", brief=True),
     code("""
     print(inspect.getsource(day3.ResNetUNet.forward))
     m_tmp = day3.ResNetUNet(num_classes=3, pretrained=False)
-    print(f"encoder {sum(p.numel() for p in m_tmp.encoder_parameters()):,} params (ImageNet), "
-          f"decoder {sum(p.numel() for p in m_tmp.decoder_parameters()):,} params (random init)")
+    n_encoder = 0                                       # parameters of the ResNet-18 encoder
+    for p in m_tmp.encoder_parameters():
+        n_encoder += p.numel()
+    n_decoder = 0                                       # parameters of the decoder
+    for p in m_tmp.decoder_parameters():
+        n_decoder += p.numel()
+    print(f"encoder {n_encoder:,} params (ImageNet), decoder {n_decoder:,} params (random init)")
     with torch.no_grad():
         print("output:", tuple(m_tmp(torch.zeros(1, 3, 128, 128)).shape))
     """),
@@ -392,6 +494,8 @@ CELLS = [
     > (background ~0.89, pet ~0.81, border ~0.50). A 3-minute CPU run on 1 200 images:
     > mIoU ~0.6. On a GPU, 10 epochs on all 3 680 images at 224 px take ~5 minutes and reach ~0.80.
     """),
+    api("torchkit.get_pet_datasets", "torchkit.fit", "torchkit.load_checkpoint", "torchkit.denormalize", "torch.Generator",
+        brief=True),
     code("""
     FORCE_TRAIN = False
     CKPT = torchkit.CHECKPOINTS / "d3_pet_resnet_unet.pt"
@@ -504,40 +608,72 @@ CELLS = [
     exercise(
         stub="""
         def sliding_window_predict(model_fn, image, window, stride):
+            '''model_fn: (1, C, window, window) -> (1, K, window, window); image (C, H, W) ->
+            (K, H, W): every pixel is the average of the predictions of all windows that cover it.'''
             C, H, W = image.shape
+            # 1. the top rows and left columns of the windows: 0, stride, 2 * stride, ...
             ys = list(range(0, max(H - window, 0) + 1, stride))
             xs = list(range(0, max(W - window, 0) + 1, stride))
-            # YOUR CODE HERE: add the border windows, accumulate predictions and counts, divide
+            # 2. YOUR CODE: if the last window stops short of the bottom border (ys[-1] + window < H), append
+            #               one more top row, H - window, so that a window ends exactly at the border
+            # YOUR CODE: the same for xs and the right border W
+            # 3. the sums of the predictions (created at the first window, once K is known), and how many windows cover each pixel
+            out = None
+            count = torch.zeros(1, H, W)
+            for y in ys:
+                for x in xs:
+                    # YOUR CODE: crop = image[:, y:y + window, x:x + window] -> (C, window, window)
+                    # YOUR CODE: pred = model_fn(crop[None])[0]: add a batch axis, run, remove it -> (K, window, window)
+                    # YOUR CODE: if out is None: out = torch.zeros(pred.shape[0], H, W, dtype=pred.dtype)
+                    # YOUR CODE: add pred into out[:, y:y + window, x:x + window], and 1 into the same window of count
+                    raise NotImplementedError
+            # 4. YOUR CODE: return out / count, the average (count (1, H, W) broadcasts over the K channels)
             raise NotImplementedError
 
         tests.check_sliding_window(sliding_window_predict)
         """,
         solution="""
         def sliding_window_predict(model_fn, image, window, stride):
+            '''model_fn: (1, C, window, window) -> (1, K, window, window); image (C, H, W) ->
+            (K, H, W): every pixel is the average of the predictions of all windows that cover it.'''
             C, H, W = image.shape
+            # 1. the top rows and left columns of the windows: 0, stride, 2 * stride, ...
             ys = list(range(0, max(H - window, 0) + 1, stride))
             xs = list(range(0, max(W - window, 0) + 1, stride))
-            if ys[-1] + window < H: ys.append(H - window)
-            if xs[-1] + window < W: xs.append(W - window)
-            out, count = None, torch.zeros(1, H, W)
+            # 2. one more window that ends exactly at the bottom / right border, if needed
+            if ys[-1] + window < H:
+                ys.append(H - window)
+            if xs[-1] + window < W:
+                xs.append(W - window)
+            # 3. the sums of the predictions (created at the first window, once K is known), and how many windows cover each pixel
+            out = None
+            count = torch.zeros(1, H, W)
             for y in ys:
                 for x in xs:
-                    pred = model_fn(image[None, :, y:y + window, x:x + window])[0]
+                    crop = image[:, y:y + window, x:x + window]       # (C, window, window)
+                    pred = model_fn(crop[None])[0]                    # (K, window, window)
                     if out is None:
-                        out = torch.zeros(pred.shape[0], H, W, dtype=pred.dtype)
+                        out = torch.zeros(pred.shape[0], H, W, dtype=pred.dtype)   # (K, H, W)
                     out[:, y:y + window, x:x + window] += pred
                     count[:, y:y + window, x:x + window] += 1
-            return out / count
+            # 4. the average over the windows
+            return out / count                                        # (K, H, W)
 
         tests.check_sliding_window(sliding_window_predict)
         """),
+    api("np.random.default_rng", "torch.tensor", brief=True),
     code("""
     rng = np.random.default_rng(5)
     big_img, _, _, big_mask = shapes.make_sample(rng, 200, max_objects=14, min_r=5, max_r=14)   # 200 px, not a multiple of 16
     big = torch.tensor(big_img).permute(2, 0, 1)
     shp_model = results["with skips"]["model"].eval()
+
+    def shapes_model_fn(window_batch):
+        # one window (1, 3, 64, 64) -> logits (1, 4, 64, 64), back on the CPU
+        return shp_model(window_batch.to(device)).cpu()
+
     with torch.no_grad():
-        logits_sw = sliding_window_predict(lambda t: shp_model(t.to(device)).cpu(), big, window=64, stride=48)
+        logits_sw = sliding_window_predict(shapes_model_fn, big, window=64, stride=48)
     pred_sw = logits_sw.argmax(0).numpy()
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
     axes[0].imshow(big_img)
@@ -561,18 +697,26 @@ CELLS = [
     Cheap, typically +0.5-1 mIoU point. (Older pipelines added a **CRF** on top to snap
     boundaries to image edges; modern decoders made it mostly unnecessary.)
     """),
+    api("Tensor.flip"),
+    api("Tensor.softmax", "np.zeros", "np.concatenate", brief=True),
     code("""
-    @torch.no_grad()
+    @torch.no_grad()                                    # no gradients inside this function
     def predict_tta(model, x):
-        return 0.5 * (model(x).softmax(1) + model(x.flip(-1)).softmax(1).flip(-1))
+        prob = model(x).softmax(1)                      # (N, K, H, W) on the images
+        prob_mirror = model(x.flip(-1)).softmax(1)      # on the mirrored images (flip the width axis)
+        prob_back = prob_mirror.flip(-1)                # mirror those predictions back
+        return 0.5 * (prob + prob_back)                 # the average of the two
 
     cm_tta = np.zeros((3, 3), np.int64)
-    probs_fg, gts_fg = [], []
+    probs_fg = []                                       # P(foreground) = 1 - P(background), per batch
+    gts_fg = []                                         # the true foreground, per batch
     for xb_, yb_ in pet_vl:
         p = predict_tta(model_pet, xb_.to(device)).cpu()
         cm_tta += seg.confusion_matrix(p.argmax(1).numpy(), yb_.numpy(), 3)
-        probs_fg.append(1 - p[:, 0].numpy()); gts_fg.append((yb_ > 0).numpy())
-    probs_fg, gts_fg = np.concatenate(probs_fg), np.concatenate(gts_fg)
+        probs_fg.append(1 - p[:, 0].numpy())
+        gts_fg.append((yb_ > 0).numpy())
+    probs_fg = np.concatenate(probs_fg)                 # (300, 128, 128)
+    gts_fg = np.concatenate(gts_fg)
     print(f"mIoU without TTA {miou_pet:.4f}  ->  with flip TTA {day3.iou_from_confusion(cm_tta)[1]:.4f}")
     """),
     md(r"""
@@ -585,26 +729,52 @@ CELLS = [
     target (over all pixels of all images). In a real project you would tune on validation
     and report on a separate test set.
     """),
+    api("np.logical_or", title="Functions you will need"),
+    api("np.logical_and", "np.asarray", "np.array", "np.linspace", "np.argmin", "np.abs", "Tensor.max", brief=True),
     exercise(
         stub="""
         def threshold_sweep(prob, target, thresholds):
-            t = np.asarray(target).astype(bool)
+            '''prob: foreground probabilities, target: 0 / 1, same shape (any); thresholds: a list of numbers ->
+            (best_threshold, ious): the threshold with the highest IoU (a float), and the IoU of every threshold (array).'''
+            prob = np.asarray(prob)
+            t = np.asarray(target).astype(bool)                 # the true foreground
             ious = []
-            # YOUR CODE HERE
+            for th in thresholds:
+                # 1. YOUR CODE: p, the predicted foreground at this threshold: prob >= th (True / False)
+                # 2. YOUR CODE: union and inter, the number of pixels in p or t, and in p and t
+                #               (np.logical_or / np.logical_and, then .sum())
+                # 3. YOUR CODE: append inter / union to ious, or 1.0 when union is 0 (both empty: perfect agreement)
+                raise NotImplementedError
+            ious = np.array(ious)                               # (number of thresholds,)
+            # 4. YOUR CODE: best, the index of the largest IoU (ious.argmax())
+            # 5. YOUR CODE: return float(thresholds[best]) and ious
             raise NotImplementedError
 
         tests.check_threshold_sweep(threshold_sweep)
         """,
         solution="""
         def threshold_sweep(prob, target, thresholds):
-            t = np.asarray(target).astype(bool)
+            '''prob: foreground probabilities, target: 0 / 1, same shape (any); thresholds: a list of numbers ->
+            (best_threshold, ious): the threshold with the highest IoU (a float), and the IoU of every threshold (array).'''
+            prob = np.asarray(prob)
+            t = np.asarray(target).astype(bool)                 # the true foreground
             ious = []
             for th in thresholds:
-                p = np.asarray(prob) >= th
+                # 1. the predicted foreground at this threshold
+                p = prob >= th
+                # 2. union and intersection, in pixels
                 union = np.logical_or(p, t).sum()
-                ious.append(np.logical_and(p, t).sum() / union if union else 1.0)
-            ious = np.array(ious)
-            return float(np.asarray(thresholds)[ious.argmax()]), ious
+                inter = np.logical_and(p, t).sum()
+                # 3. the IoU (both empty: perfect agreement)
+                if union > 0:
+                    ious.append(inter / union)
+                else:
+                    ious.append(1.0)
+            ious = np.array(ious)                               # (number of thresholds,)
+            # 4. the index of the largest IoU
+            best = ious.argmax()
+            # 5. that threshold, and all the IoUs
+            return float(thresholds[best]), ious
 
         tests.check_threshold_sweep(threshold_sweep)
         """),

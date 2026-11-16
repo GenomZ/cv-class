@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D2-04-modern-detectors"
 
@@ -47,6 +47,7 @@ CELLS = [
     md(r"""
     ## 0 · Setup
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", brief=True),
     code(SETUP),
 
     # ------------------------------------------------------------------ 1
@@ -152,13 +153,24 @@ CELLS = [
     Return `(query_idx, gt_idx)` for a cost matrix `(Q, G)`, numpy or torch: two integer arrays of
     length `G` (one pair per ground-truth object), so that `cost[query_idx, gt_idx].sum()` is minimal.
     """),
+    api("scipy.optimize.linear_sum_assignment", "torch.is_tensor", title="Functions you will need"),
+    api("Tensor.detach", "Tensor.cpu", "Tensor.numpy", "np.asarray", brief=True),
     exercise(
         stub=r"""
         from scipy.optimize import linear_sum_assignment
 
         def hungarian_match(cost):
-            cost = cost.detach().cpu().numpy() if torch.is_tensor(cost) else np.asarray(cost)
-            # YOUR CODE HERE
+            '''cost (Q, G), a NumPy array or a torch tensor -> (query_idx, gt_idx): two integer arrays of length G,
+            one (query, ground truth) pair per object, so that cost[query_idx, gt_idx].sum() is as small as possible.'''
+            # 1. SciPy works on NumPy arrays: a tensor is detached from autograd, moved to the CPU and converted
+            if torch.is_tensor(cost):
+                cost = cost.detach()
+                cost = cost.cpu()
+                cost = cost.numpy()
+            else:
+                cost = np.asarray(cost)
+            # 2. YOUR CODE: query_idx, gt_idx = the Hungarian algorithm on cost (linear_sum_assignment returns both)
+            # 3. YOUR CODE: return query_idx, gt_idx
             raise NotImplementedError
 
         tests.check_hungarian(hungarian_match)
@@ -167,18 +179,35 @@ CELLS = [
         from scipy.optimize import linear_sum_assignment
 
         def hungarian_match(cost):
-            cost = cost.detach().cpu().numpy() if torch.is_tensor(cost) else np.asarray(cost)
-            return linear_sum_assignment(cost)
+            '''cost (Q, G), a NumPy array or a torch tensor -> (query_idx, gt_idx): two integer arrays of length G,
+            one (query, ground truth) pair per object, so that cost[query_idx, gt_idx].sum() is as small as possible.'''
+            # 1. SciPy works on NumPy arrays: a tensor is detached from autograd, moved to the CPU and converted
+            if torch.is_tensor(cost):
+                cost = cost.detach()
+                cost = cost.cpu()
+                cost = cost.numpy()
+            else:
+                cost = np.asarray(cost)
+            # 2. the Hungarian algorithm: the cheapest one-to-one assignment
+            query_idx, gt_idx = linear_sum_assignment(cost)      # (G,) each, when there are more queries than objects
+            # 3. both index arrays
+            return query_idx, gt_idx
 
         tests.check_hungarian(hungarian_match)
         """),
+    api("Tensor.argmin", "np.delete"),
+    api("np.array", "np.arange", "Tensor.sum", brief=True),
     code(r"""
     # The cartoon: 3 queries, 2 objects. Greedy "each GT takes its cheapest query" vs the optimal matching
     cost = np.array([[0.20, 0.30],
                      [0.25, 0.90],
                      [0.80, 0.85]])
     r, c = day2.hungarian_match(cost)
-    greedy = [int(cost[:, 0].argmin()), int(np.delete(np.arange(3), cost[:, 0].argmin())[cost[np.delete(np.arange(3), cost[:, 0].argmin()), 1].argmin()])]
+    # greedy: GT A takes its cheapest query, then GT B takes the cheapest of the queries that are left
+    query_for_a = int(cost[:, 0].argmin())                         # query 1 (index 0), cost 0.20
+    queries_left = np.delete(np.arange(3), query_for_a)            # indices [1, 2]
+    query_for_b = int(queries_left[cost[queries_left, 1].argmin()])
+    greedy = [query_for_a, query_for_b]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.2), gridspec_kw=dict(width_ratios=[1, 1, 1.3]))
     for ax, assign, title in [(axes[0], list(zip(greedy, [0, 1])), f"greedy (GT A first): total {cost[greedy[0], 0] + cost[greedy[1], 1]:.2f}"),
                               (axes[1], list(zip(r, c)), f"Hungarian (optimal): total {cost[r, c].sum():.2f}")]:
@@ -197,7 +226,10 @@ CELLS = [
     for qi, gj in zip(r, c):
         ax.annotate("", (g[gj][0] - 0.65, g[gj][1]), (q[qi][0] + 0.65, q[qi][1]), arrowprops=dict(arrowstyle="-|>", lw=2.5, color=BLUE))
         ax.text(q[qi][0] + 0.25 * (g[gj][0] - q[qi][0]) + 0.6, q[qi][1] + 0.25 * (g[gj][1] - q[qi][1]) + 0.15, f"cost {cost[qi, gj]:.2f}", color=BLUE, ha="center")
-    unmatched = [k for k in range(3) if k not in r]
+    unmatched = []                                                 # queries that got no GT
+    for k in range(3):
+        if k not in r:
+            unmatched.append(k)
     for k in unmatched:
         ax.text(q[k][0] + 1.0, q[k][1], "-> learns 'no object'", fontsize=9, va="center", color=GREY)
     ax.set_title("one-to-one: every GT gets exactly one query", fontsize=10)
@@ -225,12 +257,23 @@ CELLS = [
     `torchvision.ops.generalized_box_iou` (needs xyxy: use `day2.box_cxcywh_to_xyxy_t`). This is the
     matrix of the lab: rows are queries, columns are ground-truth objects.
     """),
+    api("torch.cdist", "torchvision.ops.generalized_box_iou", title="Functions you will need"),
+    api("Tensor.softmax", brief=True),
     exercise(
         stub=r"""
         from torchvision.ops import generalized_box_iou
 
         def detr_cost(pred_logits, pred_boxes, gt_labels, gt_boxes, w_class=1.0, w_l1=5.0, w_giou=2.0):
-            # YOUR CODE HERE: three (Q, G) matrices, then their weighted sum
+            '''pred_logits (Q, C+1), pred_boxes (Q, 4) cxcywh in [0, 1], gt_labels (G,), gt_boxes (G, 4) cxcywh
+            -> the matching cost (Q, G): entry [i, j] says how badly query i fits ground-truth object j.'''
+            # 1. YOUR CODE: probs, the class probabilities of every query: softmax over the last axis -> (Q, C+1)
+            # 2. YOUR CODE: c_class = -probs[:, gt_labels]: column j holds every query's probability of the class
+            #               of object j, negated (a high probability is a low cost) -> (Q, G)
+            # 3. YOUR CODE: c_l1, the L1 distance between every predicted box and every GT box:
+            #               torch.cdist(pred_boxes, gt_boxes, p=1) -> (Q, G)
+            # 4. YOUR CODE: pred_xyxy and gt_xyxy, both box sets converted with day2.box_cxcywh_to_xyxy_t
+            # 5. YOUR CODE: c_giou = -generalized_box_iou(pred_xyxy, gt_xyxy) -> (Q, G)
+            # 6. YOUR CODE: return the weighted sum w_class * c_class + w_l1 * c_l1 + w_giou * c_giou
             raise NotImplementedError
 
         tests.check_detr_cost(detr_cost)
@@ -239,9 +282,20 @@ CELLS = [
         from torchvision.ops import generalized_box_iou
 
         def detr_cost(pred_logits, pred_boxes, gt_labels, gt_boxes, w_class=1.0, w_l1=5.0, w_giou=2.0):
-            c_class = -pred_logits.softmax(-1)[:, gt_labels]                     # (Q, G)
+            '''pred_logits (Q, C+1), pred_boxes (Q, 4) cxcywh in [0, 1], gt_labels (G,), gt_boxes (G, 4) cxcywh
+            -> the matching cost (Q, G): entry [i, j] says how badly query i fits ground-truth object j.'''
+            # 1. the class probabilities of every query
+            probs = pred_logits.softmax(-1)                                       # (Q, C+1)
+            # 2. class cost: minus the probability each query gives to the class of each object
+            c_class = -probs[:, gt_labels]                                        # (Q, G)
+            # 3. L1 distance between every predicted box and every GT box
             c_l1 = torch.cdist(pred_boxes, gt_boxes, p=1)                         # (Q, G)
-            c_giou = -generalized_box_iou(day2.box_cxcywh_to_xyxy_t(pred_boxes), day2.box_cxcywh_to_xyxy_t(gt_boxes))
+            # 4. GIoU needs corner coordinates
+            pred_xyxy = day2.box_cxcywh_to_xyxy_t(pred_boxes)                     # (Q, 4)
+            gt_xyxy = day2.box_cxcywh_to_xyxy_t(gt_boxes)                         # (G, 4)
+            # 5. GIoU cost: a high GIoU is a low cost
+            c_giou = -generalized_box_iou(pred_xyxy, gt_xyxy)                     # (Q, G)
+            # 6. the weighted sum
             return w_class * c_class + w_l1 * c_l1 + w_giou * c_giou
 
         tests.check_detr_cost(detr_cost)
@@ -256,6 +310,12 @@ CELLS = [
     The queries *compete*; the losers drift into "no object", like the dashed queries in the lab.
     That is why DETR needs no NMS.
     """),
+    api("nn.Parameter", "torch.full"),
+    api("torch.tensor", "torch.randn", "torch.zeros", "torch.sigmoid", "torch.optim.Adam", "F.cross_entropy",
+        "Optimizer.zero_grad", "Tensor.backward", "Optimizer.step", "torch.no_grad", brief=True,
+        title="Functions from earlier notebooks, used again here: the training loop"),
+    api("np.random.default_rng", "Tensor.abs", "Tensor.mean", "Tensor.diag", "Tensor.argmax", "Tensor.max",
+        "Tensor.tolist", brief=True, title="Functions from earlier notebooks, used again here: loss terms and read-out"),
     code(r"""
     cost_fn = detr_cost if tests.check_detr_cost(detr_cost, verbose=False) else day2.detr_cost
     match_fn = hungarian_match if tests.check_hungarian(hungarian_match, verbose=False) else day2.hungarian_match
@@ -267,20 +327,39 @@ CELLS = [
     q_cls = torch.nn.Parameter(torch.zeros(Q, 4))
     opt = torch.optim.Adam([q_box, q_cls], lr=0.05)
     weight = torch.tensor([1.0, 1.0, 1.0, 0.1])                              # "no object" down-weighted
-    snaps, hist_match = {}, []
+    snaps = {}                                                               # step -> (boxes, class probabilities), for the figure
+    hist_match = []                                                          # after every step: {GT index: query index}
     for step in range(301):
-        pb = torch.sigmoid(q_box)
+        pb = torch.sigmoid(q_box)                                            # (Q, 4) the query boxes, cxcywh in (0, 1)
         if step in (0, 15, 40, 300):                                         # snapshot before the update
             snaps[step] = (pb.detach().numpy().copy(), q_cls.softmax(-1).detach().numpy().copy())
+        # 1. match: the cost matrix, then the Hungarian assignment (no gradient needed)
         with torch.no_grad():
-            qi, gj = match_fn(cost_fn(q_cls, pb, gt_l, gt_b))
-        tgt = torch.full((Q,), NOOBJ); tgt[qi] = gt_l[gj]
+            cost_matrix = cost_fn(q_cls, pb, gt_l, gt_b)                     # (Q, G)
+            qi, gj = match_fn(cost_matrix)                                   # query qi[k] <-> object gj[k]
+        # 2. class loss for every query: target "no object", except the GT class for the matched queries
+        tgt = torch.full((Q,), NOOBJ)
+        tgt[qi] = gt_l[gj]
         l_cls = F.cross_entropy(q_cls, tgt, weight=weight)
-        l_l1 = (pb[qi] - gt_b[gj]).abs().sum(-1).mean()
-        l_giou = (1 - torchvision.ops.generalized_box_iou(day2.box_cxcywh_to_xyxy_t(pb[qi]), day2.box_cxcywh_to_xyxy_t(gt_b[gj])).diag()).mean()
+        # 3. box losses for the matched pairs only: L1 and GIoU
+        matched_pred = pb[qi]                                                # (G, 4)
+        matched_gt = gt_b[gj]                                                # (G, 4)
+        l1_per_pair = (matched_pred - matched_gt).abs().sum(-1)              # (G,)
+        l_l1 = l1_per_pair.mean()
+        pred_xyxy = day2.box_cxcywh_to_xyxy_t(matched_pred)
+        gt_xyxy = day2.box_cxcywh_to_xyxy_t(matched_gt)
+        giou_matrix = torchvision.ops.generalized_box_iou(pred_xyxy, gt_xyxy)   # (G, G): pair k sits on the diagonal
+        l_giou = (1 - giou_matrix.diag()).mean()
+        # 4. DETR's loss, one optimiser step
         loss = l_cls + 5 * l_l1 + 2 * l_giou
-        opt.zero_grad(); loss.backward(); opt.step()
-        hist_match.append(dict(zip(gj.tolist(), qi.tolist())))
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        # 5. remember the assignment of this step
+        assignment = {}
+        for g_index, q_index in zip(gj.tolist(), qi.tolist()):
+            assignment[g_index] = q_index
+        hist_match.append(assignment)
     fig, axes = plt.subplots(1, 4, figsize=(16, 4.4))
     for ax, (step, (pb, prob)) in zip(axes, snaps.items()):
         ax.imshow(s_img); ax.axis("off"); ax.set_xlim(-10, 138); ax.set_ylim(138, -10)
@@ -296,7 +375,10 @@ CELLS = [
         ax.set_title(f"step {step}: {n_obj} queries predict an object, {Q - n_obj} 'no object'", fontsize=10)
     fig.suptitle("6 learnable queries, 3 objects: matched queries converge, the others learn 'no object' (dotted)", y=1.02)
     plt.tight_layout(); plt.show()
-    switches = sum(hist_match[t] != hist_match[t - 1] for t in range(1, len(hist_match)))
+    switches = 0                                                             # steps whose assignment differs from the step before
+    for t in range(1, len(hist_match)):
+        if hist_match[t] != hist_match[t - 1]:
+            switches += 1
     print(f"the query-object assignment changed {switches} times in 300 steps. In a real DETR the queries are produced by a "
           "network from changing images, and early on the assignment flips constantly - one reason DETR trains slowly.")
     """),
@@ -323,6 +405,8 @@ CELLS = [
     The demo below runs OWL-ViT through Hugging Face `transformers` if it is installed
     (`pip install transformers`, ~600 MB of weights on first use); otherwise it draws the mechanism.
     """),
+    api("transformers.pipeline"),
+    api("torchkit.get_pet_datasets", brief=True),
     code(r"""
     from PIL import Image
     _, pet_val, _ = torchkit.get_pet_datasets(target="detection")
@@ -380,14 +464,22 @@ CELLS = [
     **only that conv** (keep the pretrained tower), set `classification_head.num_classes = 2`, and
     initialise the new conv like RetinaNet (weights $\mathcal N(0, 0.01)$, bias $-\log\frac{1-0.01}{0.01}$).
     """),
+    api("nn.init.normal_", title="Functions you will need"),
+    api("torchvision.models.detection.fcos_resnet50_fpn", "nn.Conv2d", "nn.init.constant_", brief=True),
     exercise(
         stub=r"""
         import math
         from torchvision.models.detection import fcos_resnet50_fpn
         torch.manual_seed(0)
         fcos = fcos_resnet50_fpn(weights="DEFAULT", min_size=320, max_size=512)
-        cls_head = fcos.head.classification_head
-        # YOUR CODE HERE (4-5 lines)
+        cls_head = fcos.head.classification_head           # the classification branch: tower + cls_logits conv
+        # 1. YOUR CODE: tell the head that it now has 2 classes: set cls_head.num_classes
+        # 2. YOUR CODE: in_channels, the input channels of the old conv (cls_head.cls_logits.in_channels)
+        # 3. YOUR CODE: replace cls_head.cls_logits by a new 3x3 conv (padding 1) from in_channels to
+        #               cls_head.num_anchors * 2 outputs
+        # 4. YOUR CODE: its weights from N(0, 0.01): nn.init.normal_(cls_head.cls_logits.weight, std=0.01)
+        # 5. YOUR CODE: its bias at the prior 0.01: bias_value = -math.log((1 - 0.01) / 0.01), then
+        #               nn.init.constant_(cls_head.cls_logits.bias, bias_value)
         raise NotImplementedError
 
         tests.check_box_predictor(fcos, num_classes=2)
@@ -397,19 +489,31 @@ CELLS = [
         from torchvision.models.detection import fcos_resnet50_fpn
         torch.manual_seed(0)
         fcos = fcos_resnet50_fpn(weights="DEFAULT", min_size=320, max_size=512)
-        cls_head = fcos.head.classification_head
+        cls_head = fcos.head.classification_head           # the classification branch: tower + cls_logits conv
+        # 1. the head now has 2 classes
         cls_head.num_classes = 2
-        cls_head.cls_logits = nn.Conv2d(cls_head.cls_logits.in_channels, cls_head.num_anchors * 2, 3, padding=1)
+        # 2. the input channels of the old conv
+        in_channels = cls_head.cls_logits.in_channels      # 256
+        # 3. a new last conv with num_anchors * 2 outputs (num_anchors = 1: FCOS is anchor-free)
+        cls_head.cls_logits = nn.Conv2d(in_channels, cls_head.num_anchors * 2, 3, padding=1)
+        # 4. small random weights
         nn.init.normal_(cls_head.cls_logits.weight, std=0.01)
-        nn.init.constant_(cls_head.cls_logits.bias, -math.log((1 - 0.01) / 0.01))
+        # 5. the bias at the prior 0.01, as in RetinaNet
+        bias_value = -math.log((1 - 0.01) / 0.01)
+        nn.init.constant_(cls_head.cls_logits.bias, bias_value)
 
         tests.check_box_predictor(fcos, num_classes=2)
         """),
+    api("torchvision.models.detection.fasterrcnn_resnet50_fpn_v2",
+        "torchvision.models.detection.faster_rcnn.FastRCNNPredictor", "Module.eval", brief=True),
     code(r"""
     pf_train, pf_val = day2.penn_fudan_splits(n_train=40, n_val=20, seed=0, max_side=512)
-    fcos_hist = day2.load_or_train(
-        fcos, "d2_04_fcos_pennfudan.pt",
-        lambda: day2.train_detector(fcos, pf_train, epochs=2, batch_size=2, lr=0.003, max_minutes=3, log_every=5))
+
+    def train_fcos():
+        # only called when there is no saved checkpoint yet
+        return day2.train_detector(fcos, pf_train, epochs=2, batch_size=2, lr=0.003, max_minutes=3, log_every=5)
+
+    fcos_hist = day2.load_or_train(fcos, "d2_04_fcos_pennfudan.pt", train_fcos)
     fcos.eval()
 
     # the D2-02 Faster R-CNN (same data, same budget) - loaded from its checkpoint, or trained now
@@ -420,8 +524,12 @@ CELLS = [
     torch.manual_seed(0)
     frcnn = fasterrcnn_resnet50_fpn_v2(weights="DEFAULT", **FAST)
     frcnn.roi_heads.box_predictor = FastRCNNPredictor(1024, 2)
-    day2.load_or_train(frcnn, "d2_02_frcnn_pennfudan.pt",
-                       lambda: day2.train_detector(frcnn, pf_train, epochs=2, batch_size=2, lr=0.01, max_minutes=3, log_every=5))
+
+    def train_frcnn():
+        # only called when there is no saved checkpoint yet
+        return day2.train_detector(frcnn, pf_train, epochs=2, batch_size=2, lr=0.01, max_minutes=3, log_every=5)
+
+    day2.load_or_train(frcnn, "d2_02_frcnn_pennfudan.pt", train_frcnn)
     frcnn.eval();
     """),
     md(r"""
@@ -432,32 +540,49 @@ CELLS = [
     each size, as a dict `{size: milliseconds}` (e.g. `{320: 241.0, 480: ...}`). torchvision detectors resize internally, so set `model.transform.min_size = (s,)` and
     `model.transform.max_size = s` before timing each size. Use `time.perf_counter()`.
     """),
+    api("np.median", title="Functions you will need"),
+    api("torch.rand", brief=True),
     exercise(
         stub=r"""
-        @torch.no_grad()
+        @torch.no_grad()                                              # no gradients inside this function: faster
         def benchmark(model, sizes=(320, 480, 640), repeats=3):
+            '''model: a torchvision detector -> {size: median milliseconds of one forward pass on a random s x s image}.'''
             model.eval()
             out = {}
             for s in sizes:
-                model.transform.min_size, model.transform.max_size = (s,), s
-                x = [torch.rand(3, s, s)]
-                # YOUR CODE HERE: warm-up, then `repeats` timed calls, store the median in ms
+                # 1. make the detector work at this size (it resizes every input internally)
+                model.transform.min_size = (s,)
+                model.transform.max_size = s
+                x = [torch.rand(3, s, s)]                             # a batch of one random image (detectors take a list)
+                # 2. YOUR CODE: one warm-up call model(x), not timed (the first call allocates memory)
+                # 3. YOUR CODE: times, an empty list; then `repeats` times: t0 = time.perf_counter(), model(x),
+                #               append time.perf_counter() - t0 (seconds) to times
+                # 4. YOUR CODE: out[s] = the median of times (np.median) in milliseconds (x 1000), as a float
                 raise NotImplementedError
             return out
         """,
         solution=r"""
-        @torch.no_grad()
+        @torch.no_grad()                                              # no gradients inside this function: faster
         def benchmark(model, sizes=(320, 480, 640), repeats=3):
+            '''model: a torchvision detector -> {size: median milliseconds of one forward pass on a random s x s image}.'''
             model.eval()
             out = {}
             for s in sizes:
-                model.transform.min_size, model.transform.max_size = (s,), s
-                x = [torch.rand(3, s, s)]
-                model(x)                                              # warm-up
-                ts = []
+                # 1. make the detector work at this size (it resizes every input internally)
+                model.transform.min_size = (s,)
+                model.transform.max_size = s
+                x = [torch.rand(3, s, s)]                             # a batch of one random image (detectors take a list)
+                # 2. warm-up, not timed
+                model(x)
+                # 3. `repeats` timed calls
+                times = []
                 for _ in range(repeats):
-                    t0 = time.perf_counter(); model(x); ts.append(time.perf_counter() - t0)
-                out[s] = 1000 * float(np.median(ts))
+                    t0 = time.perf_counter()
+                    model(x)
+                    times.append(time.perf_counter() - t0)            # seconds
+                # 4. the median, in milliseconds
+                median_seconds = float(np.median(times))
+                out[s] = 1000 * median_seconds
             return out
         """),
     code(r"""
@@ -486,25 +611,48 @@ CELLS = [
     mAP@0.5 and mAP@[.5:.95] on `pf_val` (`day2.evaluate_map(model, pf_val)` returns both from one
     inference pass, plus the predictions), and the latency at 320 px from `lat`. Then print it.
     """),
+    api("torchkit.count_parameters", brief=True),
     exercise(
         stub=r"""
-        rows = []
-        for name, key, model in [("Faster R-CNN v2 (two-stage)", "Faster R-CNN v2", frcnn), ("FCOS (one-stage, anchor-free)", "FCOS", fcos)]:
-            # YOUR CODE HERE: append dict(name=..., params=..., map50=..., map=..., ms=..., preds=...)
+        rows = []                                                     # one dict per model
+        # (name in the table, key in lat, the model)
+        models = [("Faster R-CNN v2 (two-stage)", "Faster R-CNN v2", frcnn),
+                  ("FCOS (one-stage, anchor-free)", "FCOS", fcos)]
+        for name, key, model in models:
+            # 1. YOUR CODE: res = day2.evaluate_map(model, pf_val): one inference pass, a dict with "map50", "map", "preds"
+            # 2. YOUR CODE: row, a dict with the keys
+            #      "name":   name
+            #      "params": the parameters in millions, torchkit.count_parameters(model) / 1e6
+            #      "map50":  res["map50"]   and   "map": res["map"]
+            #      "ms":     the latency at 320 px, lat[key][320]
+            #      "preds":  res["preds"] (the predictions, used further down)
+            # 3. YOUR CODE: append row to rows
             raise NotImplementedError
         print(f"{'model':32s}{'params':>9}{'mAP@0.5':>9}{'mAP@[.5:.95]':>14}{'ms @320':>9}")
-        for r_ in rows:
-            print(f"{r_['name']:32s}{r_['params']:8.1f}M{r_['map50']:9.3f}{r_['map']:14.3f}{r_['ms']:9.0f}")
+        for row in rows:
+            print(f"{row['name']:32s}{row['params']:8.1f}M{row['map50']:9.3f}{row['map']:14.3f}{row['ms']:9.0f}")
         """,
         solution=r"""
-        rows = []
-        for name, key, model in [("Faster R-CNN v2 (two-stage)", "Faster R-CNN v2", frcnn), ("FCOS (one-stage, anchor-free)", "FCOS", fcos)]:
+        rows = []                                                     # one dict per model
+        # (name in the table, key in lat, the model)
+        models = [("Faster R-CNN v2 (two-stage)", "Faster R-CNN v2", frcnn),
+                  ("FCOS (one-stage, anchor-free)", "FCOS", fcos)]
+        for name, key, model in models:
+            # 1. one inference pass over the validation images: mAP and predictions
             res = day2.evaluate_map(model, pf_val)
-            rows.append(dict(name=name, params=torchkit.count_parameters(model) / 1e6, map50=res["map50"], map=res["map"],
-                             ms=lat[key][320], preds=res["preds"]))
+            # 2. one row of the table
+            row = {}
+            row["name"] = name
+            row["params"] = torchkit.count_parameters(model) / 1e6
+            row["map50"] = res["map50"]
+            row["map"] = res["map"]
+            row["ms"] = lat[key][320]
+            row["preds"] = res["preds"]
+            # 3. into the table
+            rows.append(row)
         print(f"{'model':32s}{'params':>9}{'mAP@0.5':>9}{'mAP@[.5:.95]':>14}{'ms @320':>9}")
-        for r_ in rows:
-            print(f"{r_['name']:32s}{r_['params']:8.1f}M{r_['map50']:9.3f}{r_['map']:14.3f}{r_['ms']:9.0f}")
+        for row in rows:
+            print(f"{row['name']:32s}{row['params']:8.1f}M{row['map50']:9.3f}{row['map']:14.3f}{row['ms']:9.0f}")
         """),
     md(r"""
     **What to expect.** With the provided checkpoints both models land at mAP@0.5 = 0.99 and
@@ -525,6 +673,8 @@ CELLS = [
     usually sits on the head, but often too large (whole face + ears) or too small. With a GPU, the
     2 900 training images and ~10 epochs, the same code reaches mAP@0.5 above 0.95.
     """),
+    api("torchvision.transforms.v2.Compose", "torchvision.transforms.v2.ToImage", "torchvision.transforms.v2.ToDtype",
+        "Tensor.permute", "np.argsort", brief=True),
     code(r"""
     from torchvision.transforms import v2
     to_float = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
@@ -533,11 +683,17 @@ CELLS = [
     heads_val = day2.materialise(pet_ds_val, range(len(pet_ds_val)), max_side=400)
     torch.manual_seed(0)
     fcos_heads = fcos_resnet50_fpn(weights="DEFAULT", min_size=320, max_size=400)
-    h = fcos_heads.head.classification_head
-    h.num_classes = 2; h.cls_logits = nn.Conv2d(256, 2, 3, padding=1)
-    nn.init.normal_(h.cls_logits.weight, std=0.01); nn.init.constant_(h.cls_logits.bias, -math.log(99))
-    day2.load_or_train(fcos_heads, "d2_04_fcos_petheads.pt",
-                       lambda: day2.train_detector(fcos_heads, heads_train, epochs=2, batch_size=2, lr=0.003, max_minutes=2.5, log_every=6))
+    h = fcos_heads.head.classification_head                    # the same 2-class change as in Exercise 3
+    h.num_classes = 2
+    h.cls_logits = nn.Conv2d(256, 2, 3, padding=1)
+    nn.init.normal_(h.cls_logits.weight, std=0.01)
+    nn.init.constant_(h.cls_logits.bias, -math.log(99))       # -log((1 - 0.01) / 0.01)
+
+    def train_heads():
+        # only called when there is no saved checkpoint yet
+        return day2.train_detector(fcos_heads, heads_train, epochs=2, batch_size=2, lr=0.003, max_minutes=2.5, log_every=6)
+
+    day2.load_or_train(fcos_heads, "d2_04_fcos_petheads.pt", train_heads)
     heads_res = day2.evaluate_map(fcos_heads, heads_val)
     heads_preds, heads_gts = heads_res["preds"], heads_res["gts"]
     print(f"FCOS on Pet heads (16 val images): mAP@0.5 = {heads_res['map50']:.3f}, mAP@[.5:.95] = {heads_res['map']:.3f}")
@@ -568,6 +724,8 @@ CELLS = [
       production. A shift (new camera, night images, a new product) shows up there long before anyone
       labels new data - compare with the validation distribution below.
     """),
+    api("torch.onnx.export", "np.bincount"),
+    api("np.concatenate", brief=True),
     code(r"""
     # ONNX export of the D2-03-style mini detector (small, so the demo is instant)
     import io
@@ -582,9 +740,16 @@ CELLS = [
         print(f"ONNX export skipped ({type(e).__name__}: {str(e)[:100]}). `pip install onnx onnxscript` to try it.")
 
     # Production-style monitoring: the distribution of detection scores on validation images
-    fcos_preds = [r_ for r_ in rows if r_["name"].startswith("FCOS")][0]["preds"]
-    all_scores = np.concatenate([p["scores"] for p in fcos_preds])
-    n_det = [int((p["scores"] > 0.5).sum()) for p in fcos_preds]
+    for row in rows:                                         # the FCOS row of the table of Exercise 5
+        if row["name"].startswith("FCOS"):
+            fcos_preds = row["preds"]                        # one dict (boxes, scores, labels) per validation image
+            break
+    score_arrays = []                                        # the scores of every image
+    n_det = []                                               # detections with score > 0.5, per image
+    for p in fcos_preds:
+        score_arrays.append(p["scores"])
+        n_det.append(int((p["scores"] > 0.5).sum()))
+    all_scores = np.concatenate(score_arrays)
     fig, axes = plt.subplots(1, 2, figsize=(13, 3.6))
     axes[0].hist(all_scores, bins=40, color=ORANGE); axes[0].set_xlabel("detection score"); axes[0].set_ylabel("count")
     axes[0].set_title("score histogram, FCOS on Penn-Fudan val (torchvision drops scores < 0.2)")
@@ -623,8 +788,8 @@ CELLS = [
             "camera traps": "YOUR ANSWER HERE",
             "shelf audit": "YOUR ANSWER HERE",
         }
-        for k, v in answers.items():
-            print(f"{k}: {v}\n")
+        for scenario, answer in answers.items():
+            print(f"{scenario}: {answer}\n")
         """,
         solution=r"""
         answers = {
@@ -644,8 +809,8 @@ CELLS = [
                            "(or an open-vocabulary detector for prototyping). Risk: look-alike packages, "
                            "drift with new packaging -> monitor scores, re-index embeddings without retraining.",
         }
-        for k, v in answers.items():
-            print(f"{k}: {v}\n")
+        for scenario, answer in answers.items():
+            print(f"{scenario}: {answer}\n")
         """),
 
     # ------------------------------------------------------------------ 7

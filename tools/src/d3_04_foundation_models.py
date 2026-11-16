@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D3-04-foundation-models"
 
@@ -33,6 +33,8 @@ CELLS = [
     for it and falls back to a pre-rendered figure from `notebooks/assets/` or to an
     offline experiment, so the notebook always runs top to bottom.
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", "torchkit.get_pet_datasets",
+        "torch.utils.data.DataLoader", "torch.Generator", "torchkit.denormalize", brief=True),
     code("""
     import sys, pathlib, os
     for p in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:   # find the cvcourse package
@@ -84,6 +86,7 @@ CELLS = [
     4. run $L$ transformer blocks (multi-head self-attention + MLP, LayerNorm, residuals);
     5. classify from the final [class] token.
     """),
+    api("np.ones", brief=True),
     code("""
     img0 = demo_img[0]
     fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), gridspec_kw=dict(width_ratios=[1, 2.2]))
@@ -121,24 +124,42 @@ CELLS = [
     every patch meets the same weights. (That is how every ViT implements its "patch
     embedding".) Hint: `x.unfold(2, p, p).unfold(3, p, p)` gives `(B, C, H/p, W/p, p, p)`.
     """),
+    api("Tensor.unfold", title="Functions you will need"),
+    api("Tensor.permute", "Tensor.reshape", brief=True, title="Functions you will need (met before)"),
     exercise(
         stub="""
         def patchify(img, p):
+            '''img (B, C, H, W), patch size p -> (B, N, C*p*p): the N = (H/p) * (W/p) patches in row-major order,
+            each flattened in the order (C, p, p).'''
             B, C, H, W = img.shape
-            # YOUR CODE HERE (3 lines: unfold twice, permute, reshape)
+            # 1. YOUR CODE: x = img.unfold(2, p, p): cut the height into pieces of p rows -> (B, C, H/p, W, p)
+            # 2. YOUR CODE: x = x.unfold(3, p, p): the same for the width -> (B, C, H/p, W/p, p, p)
+            # 3. YOUR CODE: put the grid axes first and the channels next to the pixels of a patch:
+            #               x.permute(0, 2, 3, 1, 4, 5) -> (B, H/p, W/p, C, p, p)
+            # 4. YOUR CODE: return x reshaped to (B, (H // p) * (W // p), C * p * p)
             raise NotImplementedError
 
         tests.check_patchify(patchify)
         """,
         solution="""
         def patchify(img, p):
+            '''img (B, C, H, W), patch size p -> (B, N, C*p*p): the N = (H/p) * (W/p) patches in row-major order,
+            each flattened in the order (C, p, p).'''
             B, C, H, W = img.shape
-            x = img.unfold(2, p, p).unfold(3, p, p)            # B, C, H/p, W/p, p, p
-            x = x.permute(0, 2, 3, 1, 4, 5)                    # B, H/p, W/p, C, p, p
+            # 1. cut the height into pieces of p rows
+            x = img.unfold(2, p, p)                            # (B, C, H/p, W, p)
+            # 2. the same for the width
+            x = x.unfold(3, p, p)                              # (B, C, H/p, W/p, p, p)
+            # 3. grid axes first, then the channels and the pixels of one patch
+            x = x.permute(0, 2, 3, 1, 4, 5)                    # (B, H/p, W/p, C, p, p)
+            # 4. one row of C*p*p numbers per patch
             return x.reshape(B, (H // p) * (W // p), C * p * p)
 
         tests.check_patchify(patchify)
         """),
+    api("torchvision.models.vit_b_16"),
+    api("Module.eval", "Tensor.to", "torch.no_grad", "Tensor.flatten", "Tensor.transpose", "torch.allclose", "Tensor.abs",
+        "Tensor.max", "torchkit.count_parameters", brief=True),
     code("""
     from torchvision.models import vit_b_16, ViT_B_16_Weights
     try:
@@ -174,18 +195,35 @@ CELLS = [
     linear maps of each token. Multi-head attention runs $h$ of these in parallel on
     $D/h$-dimensional slices and concatenates.
     """),
+    api("Tensor.transpose", "Tensor.softmax", brief=True, title="Functions you will need"),
     exercise(
         stub="""
         def attention(q, k, v):
-            # YOUR CODE HERE (2-3 lines)
+            '''q (..., Nq, d), k (..., Nk, d), v (..., Nk, dv) -> (output (..., Nq, dv), weights (..., Nq, Nk)).'''
+            d = q.shape[-1]
+            # 1. YOUR CODE: scores, every query against every key: q @ k.transpose(-2, -1) -> (..., Nq, Nk)
+            # 2. YOUR CODE: divide scores by math.sqrt(d)
+            # 3. YOUR CODE: weights, the softmax over the keys (dim=-1): every row sums to 1 -> (..., Nq, Nk)
+            # 4. YOUR CODE: output, the weighted sum of the values: weights @ v -> (..., Nq, dv)
+            # 5. YOUR CODE: return output, weights
             raise NotImplementedError
 
         tests.check_attention(attention)
         """,
         solution="""
         def attention(q, k, v):
-            w = (q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1])).softmax(dim=-1)
-            return w @ v, w
+            '''q (..., Nq, d), k (..., Nk, d), v (..., Nk, dv) -> (output (..., Nq, dv), weights (..., Nq, Nk)).'''
+            d = q.shape[-1]
+            # 1. every query against every key: dot products
+            scores = q @ k.transpose(-2, -1)                   # (..., Nq, Nk)
+            # 2. scaled, so that the softmax does not saturate for large d
+            scores = scores / math.sqrt(d)
+            # 3. one probability distribution over the keys per query
+            weights = scores.softmax(dim=-1)                   # (..., Nq, Nk), rows sum to 1
+            # 4. the weighted sum of the values
+            output = weights @ v                               # (..., Nq, dv)
+            # 5. both
+            return output, weights
 
         tests.check_attention(attention)
         """),
@@ -209,6 +247,7 @@ CELLS = [
     which multiplies the attention matrices of all layers (plus the residual identity) to
     trace information back to the input.
     """),
+    api("Tensor.argmax", "Tensor.mean", "Tensor.cpu", "Tensor.numpy", brief=True),
     code("""
     if HAS_VIT:
         with torch.no_grad():
@@ -243,6 +282,8 @@ CELLS = [
     have both local heads (like a conv) and global heads; late layers are all global. This
     is the ViT paper's Figure 7, recomputed on our images.
     """),
+    api("F.normalize"),
+    api("Tensor.detach", "np.arange", brief=True),
     code("""
     if HAS_VIT:
         mad = day3.mean_attention_distance([a.cpu() for a in atts], grid=14, patch=16)
@@ -293,6 +334,8 @@ CELLS = [
     images. The surprise: the features know where objects are. The last-layer attention
     heads of DINO ViT-S/16 segment the animal although no mask was ever seen:
     """),
+    api("Tensor.cumsum", "torch.zeros_like"),
+    api("timm.create_model", "Tensor.argsort", "Tensor.sum", "Tensor.float", "F.interpolate", "np.mean", brief=True),
     code("""
     if HAS_TIMM:
         dino = timm.create_model("vit_small_patch16_224.dino", pretrained=True).eval().to(device)
@@ -312,19 +355,35 @@ CELLS = [
     code("""
     def fg_iou(heat, mask, keep=0.6):
         \"\"\"Threshold a (14, 14) heat map to keep `keep` of its mass, upsample, IoU with the pet (+border) mask.\"\"\"
-        h = heat.flatten(); order = h.argsort(descending=True)
-        cum = h[order].cumsum(0) / h.sum(); sel = torch.zeros_like(h, dtype=torch.bool); sel[order[cum <= keep]] = True
+        h = heat.flatten()                                       # (196,) attention of every patch
+        order = h.argsort(descending=True)                       # patches, strongest first
+        cum = h[order].cumsum(0) / h.sum()                       # share of the total mass covered so far
+        sel = torch.zeros_like(h, dtype=torch.bool)
+        sel[order[cum <= keep]] = True                           # the strongest patches that hold `keep` of the mass
         up = F.interpolate(sel.reshape(1, 1, 14, 14).float(), size=mask.shape, mode="nearest")[0, 0] > 0.5
         gt = mask > 0
         return float((up & gt).sum() / (up | gt).sum())
 
     rows = []
     if HAS_VIT:
-        rows.append(("supervised ViT-B/16, last layer", np.mean([fg_iou(last[i], demo_m[i]) for i in range(4)])))
-        rows.append(("supervised ViT-B/16, rollout", np.mean([fg_iou(roll[i, 0, 1:], demo_m[i]) for i in range(4)])))
+        ious_last = []                                           # one IoU per image
+        ious_roll = []
+        for i in range(4):
+            ious_last.append(fg_iou(last[i], demo_m[i]))
+            ious_roll.append(fg_iou(roll[i, 0, 1:], demo_m[i]))
+        rows.append(("supervised ViT-B/16, last layer", np.mean(ious_last)))
+        rows.append(("supervised ViT-B/16, rollout", np.mean(ious_roll)))
     if HAS_TIMM:
-        rows.append(("DINO ViT-S/16, best head", np.mean([max(fg_iou(a_dino[i, h, 0, 1:], demo_m[i]) for h in range(6)) for i in range(4)])))
-        rows.append(("DINO ViT-S/16, mean of heads", np.mean([fg_iou(a_dino[i, :, 0, 1:].mean(0), demo_m[i]) for i in range(4)])))
+        ious_best = []                                           # per image: the best of the 6 heads
+        ious_mean = []                                           # per image: the average map of the 6 heads
+        for i in range(4):
+            head_ious = []
+            for h in range(6):
+                head_ious.append(fg_iou(a_dino[i, h, 0, 1:], demo_m[i]))
+            ious_best.append(max(head_ious))
+            ious_mean.append(fg_iou(a_dino[i, :, 0, 1:].mean(0), demo_m[i]))
+        rows.append(("DINO ViT-S/16, best head", np.mean(ious_best)))
+        rows.append(("DINO ViT-S/16, mean of heads", np.mean(ious_mean)))
     for name, v in rows:
         print(f"{name:34s} IoU with the pet mask (60% of attention mass): {v:.3f}")
     """),
@@ -349,22 +408,38 @@ CELLS = [
     vectors (`torch.linalg.svd(X, full_matrices=False)`), project, and min-max scale each
     component to `[0, 1]`. Visual check: the colours below should follow object parts.
     """),
+    api("torch.linalg.svd", title="Functions you will need"),
+    api("Tensor.min", "Tensor.max", "torch.randn", "torch.zeros", "torch.cat", brief=True),
     exercise(
         stub="""
         def pca_rgb(feats, n=3):
+            '''feats (P, D): P feature vectors -> (P, n): their top-n principal components, each scaled to [0, 1].'''
             X = feats.float()
-            # YOUR CODE HERE (4-5 lines)
+            # 1. YOUR CODE: Xc, the centred features: X minus its mean over the P vectors (X.mean(0, keepdim=True)) -> (P, D)
+            # 2. YOUR CODE: _, _, Vh = torch.linalg.svd(Xc, full_matrices=False): the rows of Vh are the principal
+            #               directions, the most important first
+            # 3. YOUR CODE: proj, the coordinates along the top n directions: Xc @ Vh[:n].T -> (P, n)
+            # 4. YOUR CODE: lo and hi, the smallest and the largest value of every component:
+            #               proj.min(0, keepdim=True).values and proj.max(0, keepdim=True).values -> (1, n) each
+            # 5. YOUR CODE: return (proj - lo) / (hi - lo + 1e-8): every component scaled to [0, 1]
             raise NotImplementedError
 
         print("shape check:", tuple(pca_rgb(torch.randn(50, 8)).shape), "(expected (50, 3))")
         """,
         solution="""
         def pca_rgb(feats, n=3):
+            '''feats (P, D): P feature vectors -> (P, n): their top-n principal components, each scaled to [0, 1].'''
             X = feats.float()
-            Xc = X - X.mean(0, keepdim=True)
-            _, _, V = torch.linalg.svd(Xc, full_matrices=False)
-            proj = Xc @ V[:n].T
-            lo, hi = proj.min(0, keepdim=True).values, proj.max(0, keepdim=True).values
+            # 1. centre the features
+            Xc = X - X.mean(0, keepdim=True)                   # (P, D)
+            # 2. the principal directions: the rows of Vh, the most important first
+            _, _, Vh = torch.linalg.svd(Xc, full_matrices=False)
+            # 3. the coordinates along the top n directions
+            proj = Xc @ Vh[:n].T                               # (P, n)
+            # 4. the range of every component
+            lo = proj.min(0, keepdim=True).values              # (1, n)
+            hi = proj.max(0, keepdim=True).values              # (1, n)
+            # 5. every component scaled to [0, 1]
             return (proj - lo) / (hi - lo + 1e-8)
 
         print("shape check:", tuple(pca_rgb(torch.randn(50, 8)).shape), "(expected (50, 3))")
@@ -425,6 +500,7 @@ CELLS = [
     > ResNet-50 (full training set) reaches ~92%. With the full Pet training set DINOv2
     > ViT-S/14 k-NN gives ~90%+ and a linear probe ~93-95% - without fine-tuning.
     """),
+    api("torch.load", "torch.save", "torchvision.models.resnet18", "nn.Identity", "Tensor.item", brief=True),
     code("""
     FEATS = torchkit.CHECKPOINTS / "d3_pet_features.pt"
     from torchvision.models import resnet18, ResNet18_Weights
@@ -434,17 +510,27 @@ CELLS = [
         print("loaded cached features:", {k: tuple(v.shape) for k, v in feats.items()})
     else:
         tr_cls, va_cls, breeds = torchkit.get_pet_datasets(size=224, subset=(6 * 37, 4 * 37))
-        tl_cls, vl_cls = DataLoader(tr_cls, batch_size=32), DataLoader(va_cls, batch_size=32)
-        r18 = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval().to(device); r18.fc = nn.Identity()
-        extractors = {"resnet18": lambda x: r18(x.to(device))}
+        tl_cls = DataLoader(tr_cls, batch_size=32)
+        vl_cls = DataLoader(va_cls, batch_size=32)
+        r18 = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).eval().to(device)
+        r18.fc = nn.Identity()                                             # no classifier: 512-D features
+
+        def resnet18_features(x):
+            return r18(x.to(device))
+
+        def dinov2_features(x):
+            return dinov2(x.to(device))                                    # timm: pooled [class] token, 384-D
+
+        extractors = {"resnet18": resnet18_features}                       # name -> function images -> features
         if HAS_TIMM:
-            extractors["dinov2"] = lambda x: dinov2(x.to(device))          # timm: pooled [class] token, 384-D
+            extractors["dinov2"] = dinov2_features
         feats = {}
         t0 = time.time()
         for name, fn in extractors.items():
             for split, loader in [("train", tl_cls), ("val", vl_cls)]:
-                f, y = day3.extract_features(fn, loader)
-                feats[f"{name}_{split}"], feats[f"y_{split}"] = f, y
+                f, y = day3.extract_features(fn, loader)                   # features (n, D), labels (n,)
+                feats[f"{name}_{split}"] = f
+                feats[f"y_{split}"] = y
             print(f"{name}: features extracted ({time.time() - t0:.0f} s)")
         torch.save(feats, FEATS)
 
@@ -511,20 +597,39 @@ CELLS = [
     ~100) and softmax over classes. Return `(pred, probs)`: `pred (N,)` class indices and
     `probs (N, C)`, each row summing to 1.
     """),
+    api("F.normalize", "torch.as_tensor", "Tensor.softmax", "Tensor.argmax", brief=True, title="Functions you will need"),
     exercise(
         stub="""
         def zero_shot_classify(image_feats, text_feats, logit_scale=100.0):
-            # YOUR CODE HERE (3-4 lines)
+            '''image_feats (N, D), text_feats (C, D), not normalised -> (pred (N,) class indices, probs (N, C), rows sum to 1).'''
+            # 1. both as float tensors
+            img = torch.as_tensor(image_feats).float()         # (N, D)
+            txt = torch.as_tensor(text_feats).float()          # (C, D)
+            # 2. YOUR CODE: L2-normalise both along the last axis (F.normalize(..., dim=-1)): unit vectors
+            # 3. YOUR CODE: logits, the scaled cosine similarity of every image with every class:
+            #               (logit_scale * img) @ txt.T -> (N, C)
+            # 4. YOUR CODE: probs, the softmax of logits over the classes (dim=-1) -> (N, C)
+            # 5. YOUR CODE: pred, the most likely class of every image (argmax over dim=-1); return pred, probs
             raise NotImplementedError
 
         tests.check_zero_shot(zero_shot_classify)
         """,
         solution="""
         def zero_shot_classify(image_feats, text_feats, logit_scale=100.0):
-            img = F.normalize(torch.as_tensor(image_feats).float(), dim=-1)
-            txt = F.normalize(torch.as_tensor(text_feats).float(), dim=-1)
-            probs = (logit_scale * img @ txt.T).softmax(dim=-1)
-            return probs.argmax(dim=-1), probs
+            '''image_feats (N, D), text_feats (C, D), not normalised -> (pred (N,) class indices, probs (N, C), rows sum to 1).'''
+            # 1. both as float tensors
+            img = torch.as_tensor(image_feats).float()         # (N, D)
+            txt = torch.as_tensor(text_feats).float()          # (C, D)
+            # 2. unit vectors: the dot product of two of them is their cosine similarity
+            img = F.normalize(img, dim=-1)
+            txt = F.normalize(txt, dim=-1)
+            # 3. the scaled cosine similarity of every image with every class
+            logits = (logit_scale * img) @ txt.T               # (N, C)
+            # 4. probabilities over the classes
+            probs = logits.softmax(dim=-1)                     # (N, C)
+            # 5. the most likely class
+            pred = probs.argmax(dim=-1)                        # (N,)
+            return pred, probs
 
         tests.check_zero_shot(zero_shot_classify)
         """),
@@ -550,17 +655,27 @@ CELLS = [
     exercise(
         stub="""
         def prompt_ensemble(text):
-            # YOUR CODE HERE (1-2 lines)
+            '''text (T, C, D): the embeddings of T templates for C classes -> (C, D): one unit vector per class.'''
+            # 1. YOUR CODE: unit, every embedding L2-normalised (F.normalize(text, dim=-1)) -> (T, C, D)
+            # 2. YOUR CODE: mean, the average over the T templates (.mean(0)) -> (C, D)
+            # 3. YOUR CODE: return mean normalised again -> (C, D)
             raise NotImplementedError
 
         tests.check_prompt_ensemble(prompt_ensemble)
         """,
         solution="""
         def prompt_ensemble(text):
-            return F.normalize(F.normalize(text, dim=-1).mean(0), dim=-1)
+            '''text (T, C, D): the embeddings of T templates for C classes -> (C, D): one unit vector per class.'''
+            # 1. every embedding as a unit vector, so that every template has the same say
+            unit = F.normalize(text, dim=-1)                   # (T, C, D)
+            # 2. the average over the templates
+            mean = unit.mean(0)                                # (C, D)
+            # 3. back to unit length
+            return F.normalize(mean, dim=-1)                   # (C, D)
 
         tests.check_prompt_ensemble(prompt_ensemble)
         """),
+    api("np.argsort", "np.linspace", "np.array", brief=True),
     code("""
     templates = ["{}", "a photo of a {}.", "a photo of a {}, a type of pet.", "a blurry photo of a {}.",
                  "a close-up photo of a {}.", "a drawing of a {}.", "itap of a {}.", "a low resolution photo of a {}."]
@@ -574,8 +689,9 @@ CELLS = [
     acc_e = (pred_e == toy["labels"]).float().mean().item()
 
     print(f"{'prompt template':38s} zero-shot accuracy (toy space, 37 classes)")
-    for name, a in sorted(zip(templates, accs), key=lambda z: -z[1]):
-        print(f"{name:38s} {a:6.1%}")
+    best_first = np.argsort(-np.array(accs), kind="stable")             # template indices, highest accuracy first
+    for t_ in best_first:
+        print(f"{templates[t_]:38s} {accs[t_]:6.1%}")
     print(f"{'ENSEMBLE of all 8 templates':38s} {acc_e:6.1%}")
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 3.8))
@@ -587,8 +703,11 @@ CELLS = [
     curve = []
     for nz in noise:
         tt = day3.toy_clip_space(37, 64, 20, image_noise=nz, template_noise=drift, shared_noise=1.0, seed=1)
-        curve.append(((zero_shot_classify(tt["img"], tt["text"][0])[0] == tt["labels"]).float().mean().item(),
-                      (zero_shot_classify(tt["img"], prompt_ensemble(tt["text"]))[0] == tt["labels"]).float().mean().item()))
+        pred_bare, _ = zero_shot_classify(tt["img"], tt["text"][0])                    # the bare class name
+        pred_ens, _ = zero_shot_classify(tt["img"], prompt_ensemble(tt["text"]))      # all 8 templates
+        acc_bare = (pred_bare == tt["labels"]).float().mean().item()
+        acc_ens = (pred_ens == tt["labels"]).float().mean().item()
+        curve.append((acc_bare, acc_ens))
     curve = np.array(curve)
     axes[1].plot(noise, curve[:, 0], "o-", label="bare class name '{}'"); axes[1].plot(noise, curve[:, 1], "o-", label="prompt ensemble")
     axes[1].set_xlabel("image noise (how far photos are from the concept)"); axes[1].set_ylabel("accuracy"); axes[1].legend(); axes[1].grid(alpha=0.3)
@@ -603,6 +722,9 @@ CELLS = [
     training image*. The cell below reproduces it on 148 test images if a CLIP package is
     installed.
     """),
+    api("open_clip.create_model_and_transforms", "open_clip.get_tokenizer", "transformers.CLIPModel.from_pretrained",
+        "transformers.CLIPProcessor.from_pretrained"),
+    api("torch.tensor", "torch.stack", brief=True),
     code("""
     clip_backend = None
     try:
@@ -621,21 +743,49 @@ CELLS = [
     else:
         from PIL import Image
         _, va_cls, breeds = torchkit.get_pet_datasets(size=224, subset=(37, 4 * 37))
-        names = [b.replace("_", " ") for b in breeds]
-        pil = [Image.open(va_cls.image_path(i)).convert("RGB") for i in range(len(va_cls))]
-        y_true = torch.tensor([va_cls.label(i) for i in range(len(va_cls))])
+        names = []                                               # "basset_hound" -> "basset hound"
+        for b in breeds:
+            names.append(b.replace("_", " "))
+        pil = []                                                 # the test images, as PIL images
+        labels_true = []                                         # and their breed indices
+        for i in range(len(va_cls)):
+            pil.append(Image.open(va_cls.image_path(i)).convert("RGB"))
+            labels_true.append(va_cls.label(i))
+        y_true = torch.tensor(labels_true)
         with torch.no_grad():
             if clip_backend == "open_clip":
                 cm_, _, prep = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion2b_s34b_b79k")
-                tok = open_clip.get_tokenizer("ViT-B-32"); cm_.eval()
-                img_f = torch.cat([cm_.encode_image(torch.stack([prep(p) for p in pil[i:i + 32]])) for i in range(0, len(pil), 32)])
-                enc_text = lambda prompts: cm_.encode_text(tok(prompts))
+                tok = open_clip.get_tokenizer("ViT-B-32")
+                cm_.eval()
+                batch_feats = []                                 # image embeddings, 32 images at a time
+                for i in range(0, len(pil), 32):
+                    batch = []
+                    for p in pil[i:i + 32]:
+                        batch.append(prep(p))                    # (3, 224, 224) preprocessed image
+                    batch_feats.append(cm_.encode_image(torch.stack(batch)))
+                img_f = torch.cat(batch_feats)                   # (number of images, D)
+
+                def enc_text(prompts):                           # list of C strings -> (C, D)
+                    return cm_.encode_text(tok(prompts))
             else:
                 cm_ = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").eval()
                 proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-                img_f = torch.cat([cm_.get_image_features(**proc(images=pil[i:i + 32], return_tensors="pt")) for i in range(0, len(pil), 32)])
-                enc_text = lambda prompts: cm_.get_text_features(**proc(text=prompts, return_tensors="pt", padding=True))
-            text_all = torch.stack([enc_text([t.format(n) for n in names]) for t in templates])      # (T, 37, D)
+                batch_feats = []                                 # image embeddings, 32 images at a time
+                for i in range(0, len(pil), 32):
+                    inputs = proc(images=pil[i:i + 32], return_tensors="pt")
+                    batch_feats.append(cm_.get_image_features(**inputs))
+                img_f = torch.cat(batch_feats)                   # (number of images, D)
+
+                def enc_text(prompts):                           # list of C strings -> (C, D)
+                    inputs = proc(text=prompts, return_tensors="pt", padding=True)
+                    return cm_.get_text_features(**inputs)
+            text_per_template = []                               # one (37, D) block per template
+            for t in templates:
+                prompts = []
+                for n in names:
+                    prompts.append(t.format(n))                  # e.g. "a photo of a beagle."
+                text_per_template.append(enc_text(prompts))
+            text_all = torch.stack(text_per_template)            # (T, 37, D)
         print(f"real CLIP ({clip_backend}) zero-shot on {len(pil)} Pet test images:")
         for t_, name in enumerate(templates):
             print(f"  {name:38s} {(zero_shot_classify(img_f, text_all[t_])[0] == y_true).float().mean():6.1%}")
@@ -655,6 +805,8 @@ CELLS = [
     ("striped cat") and returns all matching instances. **Grounding DINO + SAM**: an
     open-vocabulary detector turns text into boxes, SAM turns boxes into masks.
     """),
+    api("transformers.SamModel.from_pretrained", "transformers.SamProcessor.from_pretrained"),
+    api("np.nonzero", "np.median", "np.ma.masked_where", brief=True),
     code("""
     fig, ax = plt.subplots(figsize=(15, 4.6))
     day3.draw_sam(ax)
@@ -678,7 +830,9 @@ CELLS = [
         fig, axes = plt.subplots(1, 4, figsize=(16, 4.4))
         for i, ax in enumerate(axes):
             im = (demo_img[i] * 255).astype(np.uint8)
-            ys, xs = np.nonzero(demo_m[i].numpy() == 1); cy, cx = int(np.median(ys)), int(np.median(xs))
+            ys, xs = np.nonzero(demo_m[i].numpy() == 1)                 # the pixels of the pet
+            cy = int(np.median(ys))                                     # a simulated click in its middle
+            cx = int(np.median(xs))
             inputs = sam_proc(Image.fromarray(im), input_points=[[[cx, cy]]], return_tensors="pt")
             with torch.no_grad():
                 out = sam(**inputs)
@@ -700,35 +854,53 @@ CELLS = [
     quality (16x16 resolution, no boundary refinement, one object type at a time; the
     similarity threshold 0.2 was picked by eye on a few images).
     """),
+    api("np.clip", brief=True),
     code("""
     def point_prompt_mask(feats, click_rc, box=None, thr=0.2, out_size=224):
         \"\"\"feats (g, g, D); click_rc = (row, col) in pixels; box = (x1, y1, x2, y2) or None.\"\"\"
-        g = feats.shape[0]; f = F.normalize(feats.reshape(-1, feats.shape[-1]), dim=1)
-        r, c = int(click_rc[0] * g / out_size), int(click_rc[1] * g / out_size)
-        sim = (f @ f[r * g + c]).reshape(1, 1, g, g)
+        g = feats.shape[0]                                       # patches per side
+        # 1. every patch feature as a unit vector
+        f = feats.reshape(-1, feats.shape[-1])                   # (g*g, D)
+        f = F.normalize(f, dim=1)
+        # 2. the patch under the click
+        r = int(click_rc[0] * g / out_size)
+        c = int(click_rc[1] * g / out_size)
+        # 3. cosine similarity of every patch to the clicked one, enlarged to the image size
+        sim = f @ f[r * g + c]                                   # (g*g,)
+        sim = sim.reshape(1, 1, g, g)
         sim = F.interpolate(sim, size=(out_size, out_size), mode="bilinear", align_corners=False)[0, 0]
+        # 4. the mask: every pixel similar enough to the click
         mask = sim > thr
+        # 5. a box prompt also removes everything outside the box
         if box is not None:
-            inside = torch.zeros_like(mask); x1, y1, x2, y2 = [int(np.clip(v, 0, out_size)) for v in box]; inside[y1:y2, x1:x2] = True
+            x1 = int(np.clip(box[0], 0, out_size))
+            y1 = int(np.clip(box[1], 0, out_size))
+            x2 = int(np.clip(box[2], 0, out_size))
+            y2 = int(np.clip(box[3], 0, out_size))
+            inside = torch.zeros_like(mask)
+            inside[y1:y2, x1:x2] = True
             mask &= inside
         return mask.numpy(), sim.numpy()
+
+    def iou_with(m, gt):
+        return (m & gt).sum() / max((m | gt).sum(), 1)
 
     pfeat = patch_features(demo_x[:4])
     fig, axes = plt.subplots(3, 4, figsize=(15, 11))
     for i in range(4):
         gt = demo_m[i].numpy() > 0
-        ys, xs = np.nonzero(demo_m[i].numpy() == 1); click = (int(np.median(ys)), int(np.median(xs)))   # a simulated user click
+        ys, xs = np.nonzero(demo_m[i].numpy() == 1)                 # the pixels of the pet
+        click = (int(np.median(ys)), int(np.median(xs)))            # a simulated user click in its middle
         bx = (xs.min() - 5, ys.min() - 5, xs.max() + 5, ys.max() + 5)
         m_pt, sim = point_prompt_mask(pfeat[i], click)
         m_box, _ = point_prompt_mask(pfeat[i], click, box=bx)
-        iou = lambda m: (m & gt).sum() / max((m | gt).sum(), 1)
         axes[0, i].imshow(demo_img[i]); axes[0, i].imshow(sim, cmap="inferno", alpha=0.55)
         axes[0, i].plot(click[1], click[0], "*", ms=16, color="cyan", mec="k"); axes[0, i].set_title("similarity to the clicked patch", fontsize=9)
         axes[1, i].imshow(demo_img[i]); axes[1, i].imshow(np.ma.masked_where(~m_pt, m_pt), cmap="autumn", alpha=0.55)
-        axes[1, i].plot(click[1], click[0], "*", ms=16, color="cyan", mec="k"); axes[1, i].set_title(f"point prompt: IoU {iou(m_pt):.2f}", fontsize=9)
+        axes[1, i].plot(click[1], click[0], "*", ms=16, color="cyan", mec="k"); axes[1, i].set_title(f"point prompt: IoU {iou_with(m_pt, gt):.2f}", fontsize=9)
         axes[2, i].imshow(demo_img[i]); axes[2, i].imshow(np.ma.masked_where(~m_box, m_box), cmap="autumn", alpha=0.55)
         axes[2, i].add_patch(Rectangle((bx[0], bx[1]), bx[2] - bx[0], bx[3] - bx[1], fill=False, ec="cyan", lw=2))
-        axes[2, i].set_title(f"point + box prompt: IoU {iou(m_box):.2f}", fontsize=9)
+        axes[2, i].set_title(f"point + box prompt: IoU {iou_with(m_box, gt):.2f}", fontsize=9)
         for ax in axes[:, i]: ax.axis("off")
     plt.suptitle(f"prompt -> mask with {FEAT_NAME} patch features (no training; SAM does this at pixel precision)", y=1.0)
     plt.tight_layout(); plt.show()

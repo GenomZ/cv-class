@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D3-01-segmentation-basics"
 
@@ -31,6 +31,7 @@ CELLS = [
     NumPy for the mechanisms, PyTorch for the losses, the upsampling layers and one small
     autoencoder. Everything runs on a CPU in a few minutes.
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", brief=True),
     code("""
     import sys, pathlib
     for p in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:   # find the cvcourse package
@@ -71,6 +72,8 @@ CELLS = [
     The Oxford-IIIT Pet image below happens to contain **two** Bengal cats. The dataset gives
     a *trimap* (pet / background / uncertain border) and one head box per animal.
     """),
+    api("scipy.ndimage.label", "scipy.ndimage.binary_opening", "np.unique", "np.dstack"),
+    api("np.zeros", "np.where", "Tensor.min", "Tensor.max", brief=True),
     code("""
     from scipy import ndimage
 
@@ -150,47 +153,70 @@ CELLS = [
 
     Implement `rle_encode(mask) -> {"size": [H, W], "counts": [...]}` and `rle_decode(rle)`.
     """),
+    api("np.shape"),
+    api("np.asarray", "Tensor.reshape", "np.array_equal", brief=True),
     exercise(
         stub="""
         def rle_encode(mask):
-            flat = np.asarray(mask).astype(np.uint8).reshape(-1, order="F")   # column by column, like COCO
+            '''mask (H, W) of 0 / 1 (or bool) -> {"size": [H, W], "counts": [run lengths]}: COCO's uncompressed RLE.'''
+            mask = np.asarray(mask).astype(np.uint8)            # (H, W), values 0 / 1
+            H, W = mask.shape
+            flat = mask.reshape(-1, order="F")                  # (H * W,) column by column, like COCO
             counts = []
-            # YOUR CODE HERE: lengths of alternating runs, starting with the run of 0s (possibly empty)
-            raise NotImplementedError
-            return {"size": [int(s) for s in np.shape(mask)], "counts": counts}
+            current = 0                                         # the value of the run being counted: the first run is 0s
+            run = 0                                             # its length so far (stays 0 if the mask starts with a 1)
+            for value in flat:
+                # YOUR CODE: if value == current, the run is one pixel longer (run += 1); otherwise the run is
+                #            over: append run to counts, then a new run of `value` starts (current = value, run = 1)
+                raise NotImplementedError
+            # YOUR CODE: the last run is still open: append it to counts
+            return {"size": [int(H), int(W)], "counts": counts}
 
         def rle_decode(rle):
+            '''{"size": [H, W], "counts": [...]} -> mask (H, W) uint8 of 0 / 1: the inverse of rle_encode.'''
             H, W = rle["size"]
-            flat = np.zeros(H * W, np.uint8)
-            # YOUR CODE HERE: write each run (0s, then 1s, then 0s, ...) into flat
-            raise NotImplementedError
-            return flat.reshape((H, W), order="F")
+            flat = np.zeros(H * W, np.uint8)                    # (H * W,) all 0 to start
+            pos = 0                                             # where the next run starts in flat
+            value = 0                                           # the value of the next run: 0s first
+            for length in rle["counts"]:
+                # YOUR CODE: write value into the next `length` pixels, flat[pos:pos + length]
+                # YOUR CODE: move pos to the end of this run
+                # YOUR CODE: the next run has the other value: value = 1 - value
+                raise NotImplementedError
+            return flat.reshape((H, W), order="F")              # back to (H, W), column by column
 
         tests.check_rle(rle_encode, rle_decode)
         """,
         solution="""
         def rle_encode(mask):
-            flat = np.asarray(mask).astype(np.uint8).reshape(-1, order="F")   # column by column, like COCO
+            '''mask (H, W) of 0 / 1 (or bool) -> {"size": [H, W], "counts": [run lengths]}: COCO's uncompressed RLE.'''
+            mask = np.asarray(mask).astype(np.uint8)            # (H, W), values 0 / 1
+            H, W = mask.shape
+            flat = mask.reshape(-1, order="F")                  # (H * W,) column by column, like COCO
             counts = []
-            current, run = 0, 0
-            for v in flat:
-                if v == current:
-                    run += 1
+            current = 0                                         # the value of the run being counted: the first run is 0s
+            run = 0                                             # its length so far (stays 0 if the mask starts with a 1)
+            for value in flat:
+                if value == current:
+                    run += 1                                    # the run is one pixel longer
                 else:
-                    counts.append(run)
-                    current, run = v, 1
-            counts.append(run)
-            return {"size": [int(s) for s in np.shape(mask)], "counts": counts}
+                    counts.append(run)                          # the run is over
+                    current = value                             # a new run of the other value starts
+                    run = 1
+            counts.append(run)                                  # the last run is still open
+            return {"size": [int(H), int(W)], "counts": counts}
 
         def rle_decode(rle):
+            '''{"size": [H, W], "counts": [...]} -> mask (H, W) uint8 of 0 / 1: the inverse of rle_encode.'''
             H, W = rle["size"]
-            flat = np.zeros(H * W, np.uint8)
-            pos, val = 0, 0
-            for c in rle["counts"]:
-                flat[pos:pos + c] = val
-                pos += c
-                val = 1 - val
-            return flat.reshape((H, W), order="F")
+            flat = np.zeros(H * W, np.uint8)                    # (H * W,) all 0 to start
+            pos = 0                                             # where the next run starts in flat
+            value = 0                                           # the value of the next run: 0s first
+            for length in rle["counts"]:
+                flat[pos:pos + length] = value                  # the run
+                pos += length                                   # the next run starts here
+                value = 1 - value                               # 0 -> 1 -> 0 ...
+            return flat.reshape((H, W), order="F")              # back to (H, W), column by column
 
         tests.check_rle(rle_encode, rle_decode)
         """),
@@ -216,6 +242,8 @@ CELLS = [
     $$\text{IoU}_c = \frac{TP_c}{TP_c + FP_c + FN_c}, \qquad \text{mIoU} = \frac{1}{C}\sum_c \text{IoU}_c,
     \qquad \text{Dice}_c = \frac{2\,TP_c}{2\,TP_c + FP_c + FN_c}$$
     """),
+    api("np.zeros_like", "np.nanmean"),
+    api("np.arange", "Tensor.mean", brief=True),
     code("""
     H = W = 128
     gt = np.zeros((H, W), int); yy, xx = np.mgrid[:H, :W]
@@ -258,19 +286,28 @@ CELLS = [
     (in the lab's terms, $2TP / (2TP + FP + FN)$). Two lines with NumPy boolean arrays; return a Python
     `float`, with `eps` added to numerator and denominator so that two empty masks score 1.
     """),
+    api("np.logical_and", title="Functions you will need"),
+    api("Tensor.sum", brief=True, title="Functions you will need (met before)"),
     exercise(
         stub="""
         def dice_coefficient(pred_mask, target_mask, eps=1e-7):
-            p = np.asarray(pred_mask, bool); t = np.asarray(target_mask, bool)
-            # YOUR CODE HERE
+            '''two masks of the same shape (anything that converts to bool) -> Dice = 2|A and B| / (|A| + |B|), a float.'''
+            p = np.asarray(pred_mask, bool)                     # A, the prediction
+            t = np.asarray(target_mask, bool)                   # B, the target
+            # 1. YOUR CODE: inter, the number of pixels that are True in both (np.logical_and, then .sum())
+            # 2. YOUR CODE: return (2 * inter + eps) / (p.sum() + t.sum() + eps) as a Python float
             raise NotImplementedError
 
         tests.check_dice(dice_coefficient)
         """,
         solution="""
         def dice_coefficient(pred_mask, target_mask, eps=1e-7):
-            p = np.asarray(pred_mask, bool); t = np.asarray(target_mask, bool)
+            '''two masks of the same shape (anything that converts to bool) -> Dice = 2|A and B| / (|A| + |B|), a float.'''
+            p = np.asarray(pred_mask, bool)                     # A, the prediction
+            t = np.asarray(target_mask, bool)                   # B, the target
+            # 1. inter, the number of pixels that are True in both
             inter = np.logical_and(p, t).sum()
+            # 2. the Dice formula; eps makes two empty masks score 1 instead of 0 / 0
             return float((2 * inter + eps) / (p.sum() + t.sum() + eps))
 
         tests.check_dice(dice_coefficient)
@@ -284,6 +321,8 @@ CELLS = [
     and a deliberately flawed "prediction" (the square shifted, the triangle called a square,
     the circles shrunk).
     """),
+    api("scipy.ndimage.binary_erosion", "np.roll", "np.log1p", "np.isnan"),
+    api("np.random.default_rng", "np.ndenumerate", "np.nan_to_num", brief=True),
     code("""
     rng = np.random.default_rng(7)
     s_img, s_boxes, s_labels, s_mask = shapes.make_sample(rng, 128, max_objects=4)
@@ -322,23 +361,43 @@ CELLS = [
     Use the matrix (rows = target, columns = prediction). A class absent from both the
     prediction and the target has an undefined IoU (`nan`) and is skipped by `np.nanmean`.
     """),
+    api("np.diag", "np.nanmean", brief=True, title="Functions you will need (met before)"),
     exercise(
         stub="""
         def mean_iou(pred, target, num_classes):
-            cm = seg.confusion_matrix(pred, target, num_classes).astype(float)   # rows = target, cols = prediction
-            # YOUR CODE HERE: TP = diagonal, FP = column sum - TP, FN = row sum - TP; IoU per class; nanmean
+            '''pred, target: integer masks of the same shape, values 0 .. num_classes-1 -> mIoU (a float),
+            the mean IoU over the classes present in the prediction or the target.'''
+            cm = seg.confusion_matrix(pred, target, num_classes).astype(float)   # (C, C) rows = target, cols = prediction
+            # 1. YOUR CODE: tp, the true positives of every class: the diagonal of cm (np.diag) -> (C,)
+            # 2. YOUR CODE: fp, pixels predicted as class c that are something else: column sums (cm.sum(0)) - tp -> (C,)
+            # 3. YOUR CODE: fn, pixels of class c predicted as something else: row sums (cm.sum(1)) - tp -> (C,)
+            # 4. YOUR CODE: iou, an empty list; for every class c: union = tp[c] + fp[c] + fn[c]; append
+            #               tp[c] / union if union > 0, otherwise np.nan (class absent from both: undefined)
+            # 5. YOUR CODE: return the mean that skips the nan values, float(np.nanmean(iou))
             raise NotImplementedError
 
         tests.check_mean_iou(mean_iou)
         """,
         solution="""
         def mean_iou(pred, target, num_classes):
-            cm = seg.confusion_matrix(pred, target, num_classes).astype(float)   # rows = target, cols = prediction
-            tp = np.diag(cm)
-            fp = cm.sum(0) - tp
-            fn = cm.sum(1) - tp
-            with np.errstate(invalid="ignore", divide="ignore"):
-                iou = np.where(tp + fp + fn > 0, tp / (tp + fp + fn), np.nan)
+            '''pred, target: integer masks of the same shape, values 0 .. num_classes-1 -> mIoU (a float),
+            the mean IoU over the classes present in the prediction or the target.'''
+            cm = seg.confusion_matrix(pred, target, num_classes).astype(float)   # (C, C) rows = target, cols = prediction
+            # 1. tp, the true positives of every class: the diagonal
+            tp = np.diag(cm)                                    # (C,)
+            # 2. fp: column c holds everything predicted as c; minus the correct ones
+            fp = cm.sum(0) - tp                                 # (C,)
+            # 3. fn: row c holds every pixel that really is c; minus the correct ones
+            fn = cm.sum(1) - tp                                 # (C,)
+            # 4. the IoU of every class
+            iou = []
+            for c in range(num_classes):
+                union = tp[c] + fp[c] + fn[c]                   # pixels of class c in the prediction or the target
+                if union > 0:
+                    iou.append(tp[c] / union)
+                else:
+                    iou.append(np.nan)                          # class absent from both: undefined
+            # 5. the mean over the classes, skipping the nan values
             return float(np.nanmean(iou))
 
         tests.check_mean_iou(mean_iou)
@@ -352,6 +411,7 @@ CELLS = [
     dataset they can differ slightly. Medical imaging reports Dice, natural-image benchmarks
     report mIoU - convert before you compare papers.
     """),
+    api("np.array", "np.linspace", "np.clip", brief=True),
     code("""
     rng = np.random.default_rng(0)
     pts = []
@@ -394,20 +454,32 @@ CELLS = [
     batch and return the loss $1 - \text{Dice}$ as a 0-dim tensor. Use torch operations only, so
     autograd can differentiate it.
     """),
+    api("Tensor.float", "Tensor.sum", brief=True, title="Functions you will need (met before)"),
     exercise(
         stub="""
         def soft_dice_loss(prob, target, eps=1e-6):
+            '''prob: probabilities in [0, 1], target: 0 / 1, same shape (any) -> 1 - Dice over the whole batch, a 0-d tensor.'''
             target = target.float()
-            # YOUR CODE HERE (2-3 lines)
+            # 1. YOUR CODE: inter, the soft intersection: the sum of prob * target over all elements
+            # 2. YOUR CODE: total, the soft sizes: prob.sum() + target.sum()
+            # 3. YOUR CODE: dice = (2 * inter + eps) / (total + eps)
+            # 4. YOUR CODE: return 1 - dice
             raise NotImplementedError
 
         tests.check_soft_dice_torch(soft_dice_loss)
         """,
         solution="""
         def soft_dice_loss(prob, target, eps=1e-6):
+            '''prob: probabilities in [0, 1], target: 0 / 1, same shape (any) -> 1 - Dice over the whole batch, a 0-d tensor.'''
             target = target.float()
+            # 1. the soft intersection: a pixel with p = 0.8 on the object counts 0.8
             inter = (prob * target).sum()
-            return 1 - (2 * inter + eps) / (prob.sum() + target.sum() + eps)
+            # 2. the soft sizes of prediction and target
+            total = prob.sum() + target.sum()
+            # 3. the soft Dice
+            dice = (2 * inter + eps) / (total + eps)
+            # 4. the loss: 0 for a perfect prediction
+            return 1 - dice
 
         tests.check_soft_dice_torch(soft_dice_loss)
         """),
@@ -421,6 +493,8 @@ CELLS = [
     same voice, so 4 000 background pixels outvote a 40-pixel object. Dice normalises by the
     object size.
     """),
+    api("torch.where", "F.binary_cross_entropy", "torch.log", "np.logspace", "np.log10"),
+    api("torch.zeros", "torch.tensor", "Tensor.requires_grad_", "Tensor.backward", "Tensor.grad", "Tensor.abs", brief=True),
     code("""
     def grad_share(loss_name, n_obj, N=4096, p_obj=0.3, p_bg=0.1):
         t = torch.zeros(N); t[:n_obj] = 1
@@ -470,6 +544,8 @@ CELLS = [
     "what", fatal for "where". The first fully convolutional segmenter (FCN, 2015) simply
     upsampled that 7x7 map 32x. See what that does to a mask:
     """),
+    api("F.adaptive_avg_pool2d"),
+    api("F.interpolate", "Tensor.numpy", brief=True),
     code("""
     t = torch.tensor(pet[None, None].astype(np.float32))
     fig, axes = plt.subplots(1, 4, figsize=(13, 4))
@@ -554,21 +630,35 @@ CELLS = [
     exercise(
         stub="""
         def transposed_conv2d(x, k, stride=1):
+            '''x (H, W), kernel k (kh, kw) -> out ((H-1)*stride + kh, (W-1)*stride + kw), float:
+            every input pixel adds x[i, j] * k into the output window that starts at (i*stride, j*stride).'''
             H, W = x.shape
             kh, kw = k.shape
-            # YOUR CODE HERE
-            raise NotImplementedError
+            # 1. YOUR CODE: out, an array of zeros of the output size
+            # 2. for every input pixel (row i, column j):
+            for i in range(H):
+                for j in range(W):
+                    # YOUR CODE: top = i * stride and left = j * stride, where its stamp starts in out
+                    # YOUR CODE: add x[i, j] * k into out[top:top + kh, left:left + kw]
+                    raise NotImplementedError
+            return out
 
         tests.check_transposed_conv(transposed_conv2d)
         """,
         solution="""
         def transposed_conv2d(x, k, stride=1):
+            '''x (H, W), kernel k (kh, kw) -> out ((H-1)*stride + kh, (W-1)*stride + kw), float:
+            every input pixel adds x[i, j] * k into the output window that starts at (i*stride, j*stride).'''
             H, W = x.shape
             kh, kw = k.shape
+            # 1. out, zeros of the output size
             out = np.zeros(((H - 1) * stride + kh, (W - 1) * stride + kw))
+            # 2. for every input pixel (row i, column j):
             for i in range(H):
                 for j in range(W):
-                    out[i * stride:i * stride + kh, j * stride:j * stride + kw] += x[i, j] * k
+                    top = i * stride                            # where its stamp starts in out
+                    left = j * stride
+                    out[top:top + kh, left:left + kw] += x[i, j] * k   # overlapping stamps add up
             return out
 
         tests.check_transposed_conv(transposed_conv2d)
@@ -579,6 +669,8 @@ CELLS = [
     `k - 1`) with the **flipped** kernel - the reason it was nicknamed "fractionally strided
     convolution" (and, wrongly, "deconvolution").
     """),
+    api("F.conv_transpose2d", "np.pad"),
+    api("np.allclose", brief=True),
     code("""
     out_torch = F.conv_transpose2d(torch.tensor(xs)[None, None], torch.tensor(ks)[None, None], stride=2)[0, 0].numpy()
     stuffed = np.zeros((5, 5)); stuffed[::2, ::2] = xs                       # zero-stuffing
@@ -599,6 +691,8 @@ CELLS = [
     layers makes it worse (Odena et al., Distill 2016). Count the overlaps with an all-ones
     input and kernel (the "stamps per output pixel" map of the lab):
     """),
+    api("np.outer", "Tensor.expand"),
+    api("np.ones", "Tensor.transpose", "Tensor.contiguous", "Tensor.item", "Tensor.permute", brief=True),
     code("""
     ones = np.ones((6, 6))
     fig, axes = plt.subplots(1, 4, figsize=(16, 4.2))
@@ -624,6 +718,8 @@ CELLS = [
     The same effect with **learned (random-init)** layers: three x2 stages applied to a
     *constant* input. A perfect upsampler would return a constant image.
     """),
+    api("nn.ConvTranspose2d", "nn.Upsample", "nn.PixelShuffle", "Module.modules", "nn.init.uniform_", "nn.init.zeros_"),
+    api("nn.Sequential", "nn.Conv2d", "torch.ones", "torch.no_grad", "Tensor.std", brief=True),
     code("""
     torch.manual_seed(0)
     def stack(kind):
@@ -690,6 +786,8 @@ CELLS = [
     zeros are inserted and every output pixel is computed at low resolution, which makes it
     cheap (ESPCN super-resolution, many real-time decoders).
     """),
+    api("np.floor"),
+    api("np.stack", "np.full", "torch.randn", brief=True),
     code("""
     r = 2
     xps = np.stack([np.full((3, 3), c + 1.0) for c in range(4)])     # 4 channels = 1 output channel x r^2
@@ -713,27 +811,40 @@ CELLS = [
     `(C*r*r, H, W) -> (C, H*r, W*r)`: one `reshape`, one `transpose`, one `reshape`. The
     order of the axes in the transpose is the whole exercise.
     """),
+    api("Tensor.transpose", "Tensor.reshape", brief=True, title="Functions you will need (met before)"),
     exercise(
         stub="""
         def pixel_shuffle(x, r):
+            '''x (C*r*r, H, W) NumPy array -> (C, H*r, W*r): channel (c, a, b) becomes the pixel at offset (a, b)
+            inside every r x r output cell.'''
             C_r2, H, W = x.shape
             C = C_r2 // (r * r)
-            # YOUR CODE HERE
+            # 1. YOUR CODE: split the channel axis into (c, a, b): x.reshape(C, r, r, H, W)
+            # 2. YOUR CODE: transpose the axes to the order (C, H, a, W, b), so that a sits next to H and b next to W
+            # 3. YOUR CODE: merge (H, a) into H*r and (W, b) into W*r with one reshape; return the result
             raise NotImplementedError
 
         tests.check_pixel_shuffle(pixel_shuffle)
         """,
         solution="""
         def pixel_shuffle(x, r):
+            '''x (C*r*r, H, W) NumPy array -> (C, H*r, W*r): channel (c, a, b) becomes the pixel at offset (a, b)
+            inside every r x r output cell.'''
             C_r2, H, W = x.shape
             C = C_r2 // (r * r)
-            x = x.reshape(C, r, r, H, W)          # channel = (c, a, b)
-            x = x.transpose(0, 3, 1, 4, 2)        # C, H, a, W, b
+            # 1. split the channel axis into (c, a, b)
+            x = x.reshape(C, r, r, H, W)          # axes: c, a, b, H, W
+            # 2. a next to H, b next to W
+            x = x.transpose(0, 3, 1, 4, 2)        # axes: c, H, a, W, b
+            # 3. merge (H, a) and (W, b)
             return x.reshape(C, H * r, W * r)
 
         tests.check_pixel_shuffle(pixel_shuffle)
+        # the library layer gives the same numbers
         xt = torch.randn(1, 12, 5, 5)
-        print("matches nn.PixelShuffle:", np.allclose(pixel_shuffle(xt[0].numpy(), 2), nn.PixelShuffle(2)(xt)[0].numpy()))
+        ours = pixel_shuffle(xt[0].numpy(), 2)                  # (3, 10, 10)
+        lib = nn.PixelShuffle(2)(xt)[0].numpy()                 # (3, 10, 10)
+        print("matches nn.PixelShuffle:", np.allclose(ours, lib))
         """),
 
     # ------------------------------------------------------------------ 5
@@ -755,17 +866,30 @@ CELLS = [
     exercise(
         stub="""
         def dilate_kernel(k, dilation):
+            '''k (kh, kw) -> the equivalent dense kernel (dilation*(kh-1) + 1, dilation*(kw-1) + 1),
+            with dilation - 1 zeros between the taps.'''
             kh, kw = k.shape
-            # YOUR CODE HERE (3 lines)
+            # 1. YOUR CODE: out_h and out_w, the size of the dense kernel: dilation * (kh - 1) + 1 and the same for kw
+            # 2. YOUR CODE: out, zeros of that size, with the same dtype as k
+            # 3. YOUR CODE: put the taps at every dilation-th row and column: out[::dilation, ::dilation] = k
+            # 4. YOUR CODE: return out
             raise NotImplementedError
 
         tests.check_dilate_kernel(dilate_kernel)
         """,
         solution="""
         def dilate_kernel(k, dilation):
+            '''k (kh, kw) -> the equivalent dense kernel (dilation*(kh-1) + 1, dilation*(kw-1) + 1),
+            with dilation - 1 zeros between the taps.'''
             kh, kw = k.shape
-            out = np.zeros((dilation * (kh - 1) + 1, dilation * (kw - 1) + 1), dtype=k.dtype)
+            # 1. the size of the dense kernel
+            out_h = dilation * (kh - 1) + 1
+            out_w = dilation * (kw - 1) + 1
+            # 2. zeros of that size
+            out = np.zeros((out_h, out_w), dtype=k.dtype)
+            # 3. the taps at every dilation-th row and column
             out[::dilation, ::dilation] = k
+            # 4. the result
             return out
 
         tests.check_dilate_kernel(dilate_kernel)
@@ -776,6 +900,8 @@ CELLS = [
     field. Equal rates (2, 2, 2) leave **holes** (the "gridding" problem), which is why
     DeepLabv3 and HDC (hybrid dilated convolution, Wang et al. 2018) use rates with no common factor.
     """),
+    api("np.nonzero"),
+    api("nn.init.constant_", brief=True),
     code("""
     def rf_map(dilations, n=33):
         layers = []
@@ -803,6 +929,7 @@ CELLS = [
     conv and a global-average-pooled branch, and concatenates them: multi-scale context in
     one layer. Each branch samples the map like this:
     """),
+    api("nn.ModuleList", "torch.cat", brief=True),
     code("""
     fig, ax = plt.subplots(figsize=(6.2, 6.2))
     n = 45; c = n // 2
@@ -817,9 +944,18 @@ CELLS = [
     ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.01, 1)); ax.set_xticks([]); ax.set_yticks([])
     ax.set_title("ASPP: four branches sample the same feature map at four scales")
     plt.tight_layout(); plt.show()
-    aspp = nn.ModuleList([nn.Conv2d(256, 64, 3, padding=r, dilation=r) for r in (1, 6, 12, 18)])
+    aspp = nn.ModuleList()                                  # four parallel branches, one per rate
+    for rate in (1, 6, 12, 18):
+        aspp.append(nn.Conv2d(256, 64, 3, padding=rate, dilation=rate))   # padding = rate keeps the size
     f = torch.randn(1, 256, 32, 32)
-    print("ASPP branch outputs:", [tuple(b(f).shape) for b in aspp], "-> concat:", tuple(torch.cat([b(f) for b in aspp], 1).shape))
+    branch_outputs = []
+    branch_shapes = []
+    for branch in aspp:
+        branch_out = branch(f)                              # (1, 64, 32, 32) for every rate
+        branch_outputs.append(branch_out)
+        branch_shapes.append(tuple(branch_out.shape))
+    concat = torch.cat(branch_outputs, 1)                   # (1, 4 * 64, 32, 32): all scales side by side
+    print("ASPP branch outputs:", branch_shapes, "-> concat:", tuple(concat.shape))
     """),
 
     # ------------------------------------------------------------------ 6
@@ -833,24 +969,36 @@ CELLS = [
     and an identical one with **one skip connection** that hands the decoder the 14x14
     encoder features.
     """),
+    api("F.mse_loss", "scipy.ndimage.sobel", "np.hypot", "np.corrcoef"),
+    api("torchkit.get_fashion_mnist", "torch.utils.data.DataLoader", "torch.optim.AdamW", "Module.parameters", "Tensor.to",
+        "F.binary_cross_entropy_with_logits", "Optimizer.zero_grad", "Optimizer.step", "Module.eval", "torch.sigmoid",
+        "Tensor.cpu", "Tensor.ravel", brief=True),
     code("""
     train_fm, test_fm, fm_classes = torchkit.get_fashion_mnist(normalize=False, as_tensors=True)
     sub = train_fm                                                  # one epoch = 60k images (capped at 60 s below)
     loader = torch.utils.data.DataLoader(sub, batch_size=128, shuffle=True)
     x_test = test_fm.tensors[0][:512]
 
-    aes, curves = {}, {}
+    aes = {}                                                        # name -> trained autoencoder
+    curves = {}                                                     # name -> loss of every step
     for name, skip in [("no skip", False), ("one skip (14x14)", True)]:
         torch.manual_seed(0)
         ae = day3.ConvAutoencoder(bottleneck_ch=8, skip=skip).to(device)
         opt = torch.optim.AdamW(ae.parameters(), lr=3e-3)
-        t0, losses = time.time(), []
+        t0 = time.time()
+        losses = []
         for xb, _ in loader:
             xb = xb.to(device)
+            # the target is the input itself: reconstruct every pixel
             loss = F.binary_cross_entropy_with_logits(ae(xb), xb)
-            opt.zero_grad(); loss.backward(); opt.step(); losses.append(loss.item())
-            if time.time() - t0 > 60: break                          # wall-clock cap for slow machines
-        aes[name], curves[name] = ae.eval(), losses
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            losses.append(loss.item())
+            if time.time() - t0 > 60:                                # wall-clock cap for slow machines
+                break
+        aes[name] = ae.eval()
+        curves[name] = losses
         with torch.no_grad():
             mse = F.mse_loss(torch.sigmoid(ae(x_test.to(device))), x_test.to(device)).item()
         print(f"{name:18s} {len(losses)} steps in {time.time() - t0:4.0f}s   test MSE {mse:.4f}")
@@ -858,8 +1006,11 @@ CELLS = [
     code("""
     from scipy.ndimage import sobel
     idx = [0, 1, 2, 5, 13, 16]
+    rec = {}                                                        # name -> reconstructions of the 6 images
     with torch.no_grad():
-        rec = {k: torch.sigmoid(m(x_test[idx].to(device))).cpu() for k, m in aes.items()}
+        for name, ae in aes.items():
+            logits = ae(x_test[idx].to(device))                     # (6, 1, 28, 28)
+            rec[name] = torch.sigmoid(logits).cpu()
     fig, axes = plt.subplots(4, len(idx), figsize=(1.9 * len(idx), 8.2))
     for j, i in enumerate(idx):
         axes[0, j].imshow(x_test[i, 0], cmap="gray"); axes[0, j].set_title(fm_classes[int(test_fm.tensors[1][i])], fontsize=8)
@@ -874,7 +1025,10 @@ CELLS = [
 
     with torch.no_grad():
         err_all = (torch.sigmoid(aes["no skip"](x_test.to(device))).cpu() - x_test).abs()[:, 0].numpy()
-    edges = np.stack([np.hypot(sobel(im, 0), sobel(im, 1)) for im in x_test[:, 0].numpy()])
+    edge_maps = []                                                  # edge strength of every test image
+    for im in x_test[:, 0].numpy():                                 # im: (28, 28)
+        edge_maps.append(np.hypot(sobel(im, 0), sobel(im, 1)))      # length of the image gradient
+    edges = np.stack(edge_maps)                                     # (512, 28, 28)
     print(f"correlation between reconstruction error and edge strength: {np.corrcoef(err_all.ravel(), edges.ravel())[0, 1]:.2f}")
     """),
     md(r"""
@@ -900,6 +1054,8 @@ CELLS = [
     official benchmark), or **ignore** it in the loss (`ignore_index=2` in
     `F.cross_entropy`) because it is genuinely ambiguous.
     """),
+    api("torchkit.get_pet_datasets", "torchkit.denormalize", "Tensor.unique", "Tensor.tolist", "np.bincount", "np.median",
+        "np.round", brief=True),
     code("""
     pet_tr, pet_va, pet_classes = torchkit.get_pet_datasets(size=128, target="segmentation", subset=(240, 60))
     print(len(pet_tr), "train /", len(pet_va), "val images; classes:", pet_classes)

@@ -1,4 +1,4 @@
-from nb import md, code, exercise, header
+from nb import md, code, exercise, header, api
 
 NAME = "D3-03-instance-segmentation"
 
@@ -31,6 +31,7 @@ CELLS = [
     notebook uses small subsets, `min_size=320` and a provided checkpoint. The markdown
     gives the numbers you would see on a GPU with the full data.
     """),
+    api("np.set_printoptions", "torch.manual_seed", "torchkit.get_device", "torchkit.get_penn_fudan", brief=True),
     code("""
     import sys, pathlib
     for p in [pathlib.Path.cwd(), *pathlib.Path.cwd().parents]:   # find the cvcourse package
@@ -88,6 +89,7 @@ CELLS = [
     to the proposal box and resampled to 28x28 with `roi_align` (torchvision's
     `project_masks_on_boxes`). Let us build one:
     """),
+    api("torchvision.ops.roi_align", "Tensor.permute", "Tensor.numpy", "Tensor.float", "np.argmax", "torch.tensor", brief=True),
     code("""
     IDX = 7
     img_t, tgt = pf[IDX]
@@ -132,18 +134,34 @@ CELLS = [
     and use `mode="bilinear", align_corners=False`: exactly the 4-cell weights you hovered in
     the lab. Return the `(H, W)` bool array.
     """),
+    api("torch.as_tensor", title="Functions you will need"),
+    api("F.interpolate", "np.asarray", "np.zeros", "Tensor.sum", "np.ma.masked_where", brief=True),
     exercise(
         stub="""
         import math
 
         def paste_mask(mask28, box, image_hw, threshold=0.5):
-            m = torch.as_tensor(np.asarray(mask28, np.float32))
+            '''mask28 (28, 28) probabilities, box (x1, y1, x2, y2) in pixels (floats), image_hw = (H, W) ->
+            (H, W) bool image: the map stretched over the box, thresholded, clipped to the image.'''
+            m = torch.as_tensor(np.asarray(mask28, np.float32))     # (28, 28) tensor
             H, W = image_hw
-            x1, y1, x2, y2 = [float(v) for v in box]
-            x0, y0 = int(math.floor(x1)), int(math.floor(y1))
-            w, h = max(int(math.ceil(x2)) - x0, 1), max(int(math.ceil(y2)) - y0, 1)
-            out = np.zeros((H, W), bool)
-            # YOUR CODE HERE: resize m to (h, w), threshold, write the part inside the image into out
+            # 1. the box corners as Python floats
+            x1 = float(box[0])
+            y1 = float(box[1])
+            x2 = float(box[2])
+            y2 = float(box[3])
+            # 2. the box on the pixel grid: top-left pixel (x0, y0) and size w x h (at least 1 pixel)
+            x0 = int(math.floor(x1))
+            y0 = int(math.floor(y1))
+            w = max(int(math.ceil(x2)) - x0, 1)
+            h = max(int(math.ceil(y2)) - y0, 1)
+            out = np.zeros((H, W), bool)                            # the empty image
+            # 3. YOUR CODE: resized, m stretched to (h, w): F.interpolate(m[None, None], size=(h, w), mode="bilinear",
+            #               align_corners=False) -> (1, 1, h, w); then [0, 0] and .numpy() -> (h, w)
+            # 4. YOUR CODE: the part of the box inside the image: rows ya = max(y0, 0) to yb = min(y0 + h, H),
+            #               columns xa = max(x0, 0) to xb = min(x0 + w, W)
+            # 5. YOUR CODE: if that part is not empty (ya < yb and xa < xb): piece, the matching part of resized,
+            #               resized[ya - y0:yb - y0, xa - x0:xb - x0]; out[ya:yb, xa:xb] = piece >= threshold
             raise NotImplementedError
             return out
 
@@ -153,17 +171,33 @@ CELLS = [
         import math
 
         def paste_mask(mask28, box, image_hw, threshold=0.5):
-            m = torch.as_tensor(np.asarray(mask28, np.float32))
+            '''mask28 (28, 28) probabilities, box (x1, y1, x2, y2) in pixels (floats), image_hw = (H, W) ->
+            (H, W) bool image: the map stretched over the box, thresholded, clipped to the image.'''
+            m = torch.as_tensor(np.asarray(mask28, np.float32))     # (28, 28) tensor
             H, W = image_hw
-            x1, y1, x2, y2 = [float(v) for v in box]
-            x0, y0 = int(math.floor(x1)), int(math.floor(y1))
-            w, h = max(int(math.ceil(x2)) - x0, 1), max(int(math.ceil(y2)) - y0, 1)
-            out = np.zeros((H, W), bool)
-            resized = F.interpolate(m[None, None], size=(h, w), mode="bilinear", align_corners=False)[0, 0].numpy()
-            ya, yb = max(y0, 0), min(y0 + h, H)              # clip the box to the image
-            xa, xb = max(x0, 0), min(x0 + w, W)
+            # 1. the box corners as Python floats
+            x1 = float(box[0])
+            y1 = float(box[1])
+            x2 = float(box[2])
+            y2 = float(box[3])
+            # 2. the box on the pixel grid: top-left pixel (x0, y0) and size w x h (at least 1 pixel)
+            x0 = int(math.floor(x1))
+            y0 = int(math.floor(y1))
+            w = max(int(math.ceil(x2)) - x0, 1)
+            h = max(int(math.ceil(y2)) - y0, 1)
+            out = np.zeros((H, W), bool)                            # the empty image
+            # 3. stretch the 28x28 map over the box (F.interpolate wants (N, C, H, W))
+            resized = F.interpolate(m[None, None], size=(h, w), mode="bilinear", align_corners=False)   # (1, 1, h, w)
+            resized = resized[0, 0].numpy()                         # (h, w)
+            # 4. clip the box to the image
+            ya = max(y0, 0)
+            yb = min(y0 + h, H)
+            xa = max(x0, 0)
+            xb = min(x0 + w, W)
+            # 5. threshold the visible part and write it into the image
             if ya < yb and xa < xb:
-                out[ya:yb, xa:xb] = resized[ya - y0:yb - y0, xa - x0:xb - x0] >= threshold
+                piece = resized[ya - y0:yb - y0, xa - x0:xb - x0]   # the part of the box inside the image
+                out[ya:yb, xa:xb] = piece >= threshold
             return out
 
         tests.check_paste_mask(paste_mask)
@@ -194,6 +228,8 @@ CELLS = [
     the stride-16 feature grid** as RoIPool does. The pasted mask always goes to the exact
     box (the box branch regresses it); only the crop is misaligned.
     """),
+    api("torch.round"),
+    api("np.array", "np.linspace", "Tensor.mean", brief=True),
     code("""
     def raw_instance_mask(i):
         return np.asarray(Image.open(pf.masks[i]))
@@ -202,8 +238,10 @@ CELLS = [
     for i in range(len(pf)):
         t = day3.penn_fudan_target(raw_instance_mask(i))
         for mk, b in zip(t["masks"], t["boxes"]):
-            m = mk.float(); hw = m.shape
-            for name, bb in [("RoIAlign (exact)", b), ("RoIPool (snapped to stride 16)", torch.round(b / 16) * 16)]:
+            m = mk.float()                                         # (H, W) mask of one person
+            hw = m.shape
+            snapped = torch.round(b / 16) * 16                     # the box rounded to the stride-16 grid
+            for name, bb in [("RoIAlign (exact)", b), ("RoIPool (snapped to stride 16)", snapped)]:
                 crop = roi_align(m[None, None], [bb[None]], output_size=28, sampling_ratio=2, aligned=True)[0, 0]
                 p = paste_mask(crop, b, hw)
                 g_ = m.numpy() > 0.5
@@ -233,24 +271,42 @@ CELLS = [
     `a (N, H, W)`, `b (M, H, W)` boolean -> `(N, M)`. Flatten each mask into a row: the
     intersections of all pairs are then **one matrix product**.
     """),
+    api("Tensor.reshape", "np.maximum", brief=True, title="Functions you will need"),
     exercise(
         stub="""
         def mask_iou(a, b):
-            a = np.asarray(a).astype(bool).reshape(len(a), -1).astype(np.float64)
-            b = np.asarray(b).astype(bool).reshape(len(b), -1).astype(np.float64)
-            # YOUR CODE HERE (3-4 lines; return 0 where the union is empty)
+            '''a (N, H, W), b (M, H, W): binary masks -> (N, M), the mask IoU of every pair (0 where both are empty).'''
+            # 1. every mask as one row of 0.0 / 1.0
+            a = np.asarray(a).astype(bool)
+            a = a.reshape(len(a), -1).astype(np.float64)        # (N, H*W)
+            b = np.asarray(b).astype(bool)
+            b = b.reshape(len(b), -1).astype(np.float64)        # (M, H*W)
+            # 2. YOUR CODE: inter, the intersections of all pairs in one matrix product, a @ b.T -> (N, M)
+            #               (entry [i, j] adds up a[i] * b[j] over the pixels: 1 exactly where both masks are 1)
+            # 3. YOUR CODE: area_a, area_b, the number of pixels of every mask: the sum over axis 1 -> (N,), (M,)
+            # 4. YOUR CODE: union = area_a[:, None] + area_b[None, :] - inter -> (N, M)
+            # 5. YOUR CODE: return inter / np.maximum(union, 1) (two empty masks: 0 / 1 = 0 instead of 0 / 0)
             raise NotImplementedError
 
         tests.check_mask_iou(mask_iou)
         """,
         solution="""
         def mask_iou(a, b):
-            a = np.asarray(a).astype(bool).reshape(len(a), -1).astype(np.float64)
-            b = np.asarray(b).astype(bool).reshape(len(b), -1).astype(np.float64)
-            inter = a @ b.T
-            union = a.sum(1)[:, None] + b.sum(1)[None, :] - inter
-            with np.errstate(invalid="ignore", divide="ignore"):
-                return np.where(union > 0, inter / union, 0.0)
+            '''a (N, H, W), b (M, H, W): binary masks -> (N, M), the mask IoU of every pair (0 where both are empty).'''
+            # 1. every mask as one row of 0.0 / 1.0
+            a = np.asarray(a).astype(bool)
+            a = a.reshape(len(a), -1).astype(np.float64)        # (N, H*W)
+            b = np.asarray(b).astype(bool)
+            b = b.reshape(len(b), -1).astype(np.float64)        # (M, H*W)
+            # 2. the intersections of all pairs: one matrix product
+            inter = a @ b.T                                     # (N, M)
+            # 3. the area of every mask
+            area_a = a.sum(1)                                   # (N,)
+            area_b = b.sum(1)                                   # (M,)
+            # 4. the unions of all pairs
+            union = area_a[:, None] + area_b[None, :] - inter   # (N, 1) + (1, M) - (N, M) -> (N, M)
+            # 5. the IoU; a union of 0 means two empty masks, whose intersection is 0 too: 0 / 1 = 0
+            return inter / np.maximum(union, 1)                 # (N, M)
 
         tests.check_mask_iou(mask_iou)
         """),
@@ -260,6 +316,8 @@ CELLS = [
     second person) and why mask metrics are stricter. The pair with the largest box overlap
     in Penn-Fudan:
     """),
+    api("np.fill_diagonal", "np.unravel_index"),
+    api("Tensor.max", "Tensor.argmax", brief=True),
     code("""
     best = (0, None)
     for i in range(len(pf)):
@@ -285,60 +343,95 @@ CELLS = [
     all images, then build precision / recall and call `boxes.average_precision(p, r,
     "interp101")` (the D2-01 function).
     """),
+    api("np.argsort", "np.cumsum", "np.maximum", brief=True, title="Functions you will need"),
     exercise(
         stub="""
         def mask_ap(predictions, ground_truths, iou_threshold=0.5):
-            records, n_gt = [], 0
+            '''predictions[i] = {"masks": (N, H, W), "scores": (N,)}, ground_truths[i] = {"masks": (M, H, W)}, one class ->
+            AP (COCO 101-point) over all images, with greedy matching by mask IoU.'''
+            all_scores = []                                     # the score of every prediction of every image
+            all_tp = []                                         # whether that prediction is a true positive
+            n_gt = 0                                            # the number of GT masks in all images
             for pred, gt in zip(predictions, ground_truths):
-                gm = np.asarray(gt["masks"]).astype(bool)
-                pm = np.asarray(pred["masks"]).astype(bool)
-                ps = np.asarray(pred["scores"], float)
+                gm = np.asarray(gt["masks"]).astype(bool)       # (M, H, W)
+                pm = np.asarray(pred["masks"]).astype(bool)     # (N, H, W)
+                ps = np.asarray(pred["scores"], float)          # (N,)
                 n_gt += len(gm)
                 if len(pm) == 0:
                     continue
-                order = np.argsort(-ps)
-                ious = mask_iou(pm[order], gm) if len(gm) else np.zeros((len(pm), 0))
-                matched = np.zeros(len(gm), bool)
-                # YOUR CODE HERE: for each prediction in score order, match it to the best unmatched GT
-                #                 (IoU >= threshold -> TP, mark the GT matched; otherwise FP); append (score, tp)
-                raise NotImplementedError
-            if not records:
+                # 1. this image's predictions in score order, and their IoU with every GT mask
+                order = np.argsort(-ps)                         # (N,)
+                if len(gm) > 0:
+                    ious = mask_iou(pm[order], gm)              # (N, M); row k = the k-th best prediction
+                else:
+                    ious = np.zeros((len(pm), 0))               # no GT: every prediction will be a FP
+                matched = np.zeros(len(gm), bool)               # (M,) becomes True once a GT has been found
+                # 2. greedy matching, best score first (as precision_recall in D2-01)
+                for k in range(len(order)):
+                    # YOUR CODE: is_tp = False; if there is at least one GT: row = a copy of ious[k] (.copy()),
+                    #            row[matched] = -1, j = the GT with the highest IoU in row; if row[j] >= iou_threshold:
+                    #            GT j is matched and is_tp = True
+                    # YOUR CODE: append the score ps[order[k]] to all_scores and is_tp to all_tp
+                    raise NotImplementedError
+            if len(all_scores) == 0:
                 return 0.0
-            records.sort(key=lambda r: -r[0])
-            tp = np.array([r[1] for r in records], bool)
-            # YOUR CODE HERE: cumulative TP / FP -> precision, recall -> boxes.average_precision(..., "interp101")
+            # 3. all images together, highest score first (kind="stable": equal scores keep their order)
+            order = np.argsort(-np.array(all_scores), kind="stable")
+            tp = np.array(all_tp, bool)
+            tp = tp[order]                                      # (number of predictions,)
+            # 4. YOUR CODE: tp_count and fp_count, the running counts (np.cumsum of tp and of ~tp)
+            # 5. YOUR CODE: precision = tp_count / np.maximum(tp_count + fp_count, 1e-12); recall = tp_count / max(n_gt, 1)
+            # 6. YOUR CODE: return boxes.average_precision(precision, recall, "interp101")
             raise NotImplementedError
 
         tests.check_mask_ap(mask_ap)
         """,
         solution="""
         def mask_ap(predictions, ground_truths, iou_threshold=0.5):
-            records, n_gt = [], 0
+            '''predictions[i] = {"masks": (N, H, W), "scores": (N,)}, ground_truths[i] = {"masks": (M, H, W)}, one class ->
+            AP (COCO 101-point) over all images, with greedy matching by mask IoU.'''
+            all_scores = []                                     # the score of every prediction of every image
+            all_tp = []                                         # whether that prediction is a true positive
+            n_gt = 0                                            # the number of GT masks in all images
             for pred, gt in zip(predictions, ground_truths):
-                gm = np.asarray(gt["masks"]).astype(bool)
-                pm = np.asarray(pred["masks"]).astype(bool)
-                ps = np.asarray(pred["scores"], float)
+                gm = np.asarray(gt["masks"]).astype(bool)       # (M, H, W)
+                pm = np.asarray(pred["masks"]).astype(bool)     # (N, H, W)
+                ps = np.asarray(pred["scores"], float)          # (N,)
                 n_gt += len(gm)
                 if len(pm) == 0:
                     continue
-                order = np.argsort(-ps)
-                ious = mask_iou(pm[order], gm) if len(gm) else np.zeros((len(pm), 0))
-                matched = np.zeros(len(gm), bool)
+                # 1. this image's predictions in score order, and their IoU with every GT mask
+                order = np.argsort(-ps)                         # (N,)
+                if len(gm) > 0:
+                    ious = mask_iou(pm[order], gm)              # (N, M); row k = the k-th best prediction
+                else:
+                    ious = np.zeros((len(pm), 0))               # no GT: every prediction will be a FP
+                matched = np.zeros(len(gm), bool)               # (M,) becomes True once a GT has been found
+                # 2. greedy matching, best score first (as precision_recall in D2-01)
                 for k in range(len(order)):
-                    tp = False
-                    if len(gm):
-                        row = ious[k].copy(); row[matched] = -1
+                    is_tp = False
+                    if len(gm) > 0:
+                        row = ious[k].copy()                    # (M,) IoU of this prediction with every GT
+                        row[matched] = -1                       # a GT can be found only once
                         j = int(row.argmax())
                         if row[j] >= iou_threshold:
-                            matched[j] = True; tp = True
-                    records.append((ps[order[k]], tp))
-            if not records:
+                            matched[j] = True
+                            is_tp = True
+                    all_scores.append(ps[order[k]])
+                    all_tp.append(is_tp)
+            if len(all_scores) == 0:
                 return 0.0
-            records.sort(key=lambda r: -r[0])
-            tp = np.array([r[1] for r in records], bool)
-            tp_c, fp_c = np.cumsum(tp), np.cumsum(~tp)
-            precision = tp_c / np.maximum(tp_c + fp_c, 1e-12)
-            recall = tp_c / max(n_gt, 1)
+            # 3. all images together, highest score first (kind="stable": equal scores keep their order)
+            order = np.argsort(-np.array(all_scores), kind="stable")
+            tp = np.array(all_tp, bool)
+            tp = tp[order]                                      # (number of predictions,)
+            # 4. running counts down the list
+            tp_count = np.cumsum(tp)
+            fp_count = np.cumsum(~tp)
+            # 5. precision and recall after every prediction
+            precision = tp_count / np.maximum(tp_count + fp_count, 1e-12)
+            recall = tp_count / max(n_gt, 1)
+            # 6. the area under the curve, COCO style
             return boxes.average_precision(precision, recall, "interp101")
 
         tests.check_mask_ap(mask_ap)
@@ -367,6 +460,7 @@ CELLS = [
     (0 = background). torchvision detection models want, per image, a dict with
     `boxes (N, 4)` float xyxy, `labels (N,)` int64 and `masks (N, H, W)` uint8.
     """),
+    api("np.unique", brief=True),
     code("""
     raw = raw_instance_mask(IDX)
     print("raw mask PNG:", raw.shape, raw.dtype, "values", np.unique(raw))
@@ -385,13 +479,23 @@ CELLS = [
     convention: max = last pixel index), label 1 (person) for everyone. The broadcasting
     trick `m[None] == ids[:, None, None]` builds all masks in one line.
     """),
+    api("torch.unique", "torch.where", "torch.zeros", "torch.ones", "Tensor.to", "Tensor.min", brief=True,
+        title="Functions you will need"),
     exercise(
         stub="""
         def penn_fudan_target(instance_mask):
-            m = torch.as_tensor(np.array(instance_mask))
+            '''instance_mask (H, W): pixel value k = person number k, 0 = background ->
+            {"boxes": (N, 4) float32 xyxy, "labels": (N,) int64 (all 1), "masks": (N, H, W) uint8}.'''
+            m = torch.as_tensor(np.array(instance_mask))        # (H, W)
+            # 1. the instance ids, sorted, without the background 0
             ids = torch.unique(m)
-            ids = ids[ids != 0]
-            # YOUR CODE HERE: masks (N, H, W) uint8, boxes (N, 4) float32, labels (N,) int64
+            ids = ids[ids != 0]                                 # (N,)
+            # 2. YOUR CODE: masks, one binary mask per id, all at once with broadcasting:
+            #               m[None] (1, H, W) == ids[:, None, None] (N, 1, 1) -> (N, H, W) bool; then .to(torch.uint8)
+            # 3. YOUR CODE: boxes_ = torch.zeros((len(ids), 4), dtype=torch.float32); for every mask i (enumerate):
+            #               ys, xs = torch.where(mask > 0), the rows and columns of its pixels;
+            #               boxes_[i] = torch.tensor([xs.min(), ys.min(), xs.max(), ys.max()], dtype=torch.float32)
+            # 4. YOUR CODE: labels, N ones of dtype torch.int64 (every instance is a person)
             raise NotImplementedError
             return {"boxes": boxes_, "labels": labels, "masks": masks}
 
@@ -399,19 +503,27 @@ CELLS = [
         """,
         solution="""
         def penn_fudan_target(instance_mask):
-            m = torch.as_tensor(np.array(instance_mask))
+            '''instance_mask (H, W): pixel value k = person number k, 0 = background ->
+            {"boxes": (N, 4) float32 xyxy, "labels": (N,) int64 (all 1), "masks": (N, H, W) uint8}.'''
+            m = torch.as_tensor(np.array(instance_mask))        # (H, W)
+            # 1. the instance ids, sorted, without the background 0
             ids = torch.unique(m)
-            ids = ids[ids != 0]
-            masks = (m[None] == ids[:, None, None]).to(torch.uint8)
+            ids = ids[ids != 0]                                 # (N,)
+            # 2. one binary mask per id, all at once: (1, H, W) == (N, 1, 1) -> (N, H, W)
+            masks = m[None] == ids[:, None, None]               # (N, H, W) bool
+            masks = masks.to(torch.uint8)
+            # 3. the box of every mask: the extreme columns and rows of its pixels
             boxes_ = torch.zeros((len(ids), 4), dtype=torch.float32)
-            for i, mk in enumerate(masks):
-                ys, xs = torch.where(mk > 0)
+            for i, mask in enumerate(masks):
+                ys, xs = torch.where(mask > 0)                  # rows and columns of the pixels of instance i
                 boxes_[i] = torch.tensor([xs.min(), ys.min(), xs.max(), ys.max()], dtype=torch.float32)
+            # 4. every instance is a person: label 1
             labels = torch.ones(len(ids), dtype=torch.int64)
             return {"boxes": boxes_, "labels": labels, "masks": masks}
 
         tests.check_penn_fudan_target(penn_fudan_target)
         """),
+    api("torch.allclose", "torch.equal"),
     code("""
     mine = penn_fudan_target(raw)
     lib = pf[IDX][1]
@@ -439,6 +551,8 @@ CELLS = [
     input sizes from the old predictors printed below (`cls_score.in_features`,
     `conv5_mask.in_channels`).
     """),
+    api("torchvision.models.detection.mask_rcnn.MaskRCNNPredictor", title="Functions you will need"),
+    api("torchvision.models.detection.faster_rcnn.FastRCNNPredictor", brief=True, title="Functions you will need (met before)"),
     exercise(
         stub="""
         from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
@@ -448,7 +562,10 @@ CELLS = [
         coco_model = copy.deepcopy(model)                       # keep the original for comparison
         print("COCO box predictor:", model.roi_heads.box_predictor)
         print("COCO mask predictor:", model.roi_heads.mask_predictor)
-        # YOUR CODE HERE: a FastRCNNPredictor and a MaskRCNNPredictor (256 hidden channels) for 2 classes
+        # 1. YOUR CODE: in_features, the input size of the old box predictor's cls_score layer (.in_features)
+        # 2. YOUR CODE: model.roi_heads.box_predictor = a new FastRCNNPredictor(in_features, 2)
+        # 3. YOUR CODE: in_ch, the input channels of the old mask predictor's conv5_mask layer (.in_channels)
+        # 4. YOUR CODE: model.roi_heads.mask_predictor = a new MaskRCNNPredictor(in_ch, 256, 2) (256 hidden channels)
         raise NotImplementedError
 
         tests.check_maskrcnn_heads(model, num_classes=2)
@@ -461,9 +578,13 @@ CELLS = [
         coco_model = copy.deepcopy(model)                       # keep the original for comparison
         print("COCO box predictor:", model.roi_heads.box_predictor)
         print("COCO mask predictor:", model.roi_heads.mask_predictor)
+        # 1. the input size of the old box predictor
         in_features = model.roi_heads.box_predictor.cls_score.in_features              # 1024
+        # 2. a new box predictor for background + person
         model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 2)
+        # 3. the input channels of the old mask predictor
         in_ch = model.roi_heads.mask_predictor.conv5_mask.in_channels                  # 256
+        # 4. a new mask predictor: 256 hidden channels, one 28x28 mask per class
         model.roi_heads.mask_predictor = MaskRCNNPredictor(in_ch, 256, 2)
 
         tests.check_maskrcnn_heads(model, num_classes=2)
@@ -479,6 +600,9 @@ CELLS = [
     We also **freeze the ResNet body** (the FPN, RPN and heads still train): it halves the
     cost of a step, and 20 images are not enough to improve ImageNet+COCO features anyway.
     """),
+    api("torch.utils.data.Subset"),
+    api("Module.parameters", "Tensor.requires_grad_", "torchkit.count_parameters", "torchvision.transforms.v2.RandomHorizontalFlip",
+        "torch.utils.data.DataLoader", brief=True),
     code("""
     day3.warm_start_from_coco(model, coco_model)
     for p in model.backbone.body.parameters():
@@ -504,6 +628,7 @@ CELLS = [
     > GPU, ~5 min) reports box AP ~0.8 and mask AP ~0.75 at [.5:.95]. Note how good the
     > *untouched* COCO model already is: pedestrians are COCO's most frequent class.
     """),
+    api("torchkit.load_checkpoint", "torchkit.save_checkpoint", "torch.optim.SGD", "np.convolve", "np.ones", brief=True),
     code("""
     FORCE_TRAIN = False
     CKPT = torchkit.CHECKPOINTS / "d3_maskrcnn_pennfudan.pt"
@@ -513,7 +638,10 @@ CELLS = [
         hist = extra.get("history", {})
         print(f"loaded {CKPT.name}: {extra.get('iters')} iterations on {extra.get('images')} images")
     else:
-        params = [p for p in model.parameters() if p.requires_grad]
+        params = []                                               # only the parameters that are not frozen
+        for p in model.parameters():
+            if p.requires_grad:
+                params.append(p)
         opt = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=1e-4)
         hist = day3.train_detector(model, train_loader, opt, max_iters=30, max_minutes=2.5, log_every=5)
         torchkit.save_checkpoint(model, CKPT, iters=hist["iters"], images=len(train_idx), history=hist)
@@ -533,9 +661,12 @@ CELLS = [
 
     ### Evaluate: fine-tuned vs the original COCO model
     """),
+    api("np.arange", "np.mean", "np.argmin", "np.round", "Tensor.any", brief=True),
     code("""
-    val_imgs = [pf[i][0] for i in val_idx]
-    val_gts = []
+    val_imgs = []                                                         # (3, H, W) image tensors
+    for i in val_idx:
+        val_imgs.append(pf[i][0])
+    val_gts = []                                                          # boxes and boolean masks, as NumPy
     for i in val_idx:
         t_ = pf[i][1]
         val_gts.append({"boxes": t_["boxes"].numpy(), "masks": t_["masks"].numpy().astype(bool)})
@@ -574,21 +705,34 @@ CELLS = [
     """),
     code("""
     def pq_things(preds, gts, score_threshold=0.5):
-        tp_iou, fp, fn = [], 0, 0
+        tp_iou = []                                              # the IoU of every matched (prediction, GT) pair
+        fp = 0                                                   # predictions without a GT
+        fn = 0                                                   # GTs without a prediction
         for p, g in zip(preds, gts):
-            pm = p["masks"][p["scores"] >= score_threshold]
+            pm = p["masks"][p["scores"] >= score_threshold]      # the confident predicted masks
             gm = g["masks"]
-            ious = mask_iou(pm, gm) if len(pm) and len(gm) else np.zeros((len(pm), len(gm)))
-            used = np.zeros(len(pm), bool)
+            if len(pm) > 0 and len(gm) > 0:
+                ious = mask_iou(pm, gm)                          # (predictions, GTs)
+            else:
+                ious = np.zeros((len(pm), len(gm)))
+            used = np.zeros(len(pm), bool)                       # predictions already matched
             for j in range(len(gm)):                             # IoU > 0.5 -> a unique match
-                i = int(ious[:, j].argmax()) if len(pm) else -1
+                if len(pm) > 0:
+                    i = int(ious[:, j].argmax())                 # the best prediction for GT j
+                else:
+                    i = -1
                 if i >= 0 and ious[i, j] > 0.5 and not used[i]:
-                    used[i] = True; tp_iou.append(ious[i, j])
+                    used[i] = True
+                    tp_iou.append(ious[i, j])
                 else:
                     fn += 1
             fp += int((~used).sum())
-        tp = len(tp_iou); sq = float(np.mean(tp_iou)) if tp else 0.0
-        rq = tp / max(tp + 0.5 * fp + 0.5 * fn, 1e-9)
+        tp = len(tp_iou)
+        if tp > 0:
+            sq = float(np.mean(tp_iou))                          # segmentation quality: mean IoU of the matches
+        else:
+            sq = 0.0
+        rq = tp / max(tp + 0.5 * fp + 0.5 * fn, 1e-9)            # recognition quality: an F1 score
         return sq * rq, sq, rq, tp, fp, fn
 
     for name, P in [("COCO model", preds_coco), ("fine-tuned", preds_ft)]:
@@ -619,16 +763,28 @@ CELLS = [
     """),
     code("""
     # failure analysis: the held-out image with the lowest per-image mask AP50
-    per_img = [mask_ap([p], [g], 0.5) for p, g in zip(preds_ft, val_gts)]
-    w = int(np.argmin(per_img))
-    im = val_imgs[w].permute(1, 2, 0).numpy(); p = preds_ft[w]; keep = p["scores"] >= 0.5
-    pm, gm = p["masks"][keep], val_gts[w]["masks"]
-    ious = mask_iou(pm, gm) if len(pm) and len(gm) else np.zeros((len(pm), len(gm)))
+    per_img = []                                                  # mask AP50 of every image on its own
+    for p, g in zip(preds_ft, val_gts):
+        per_img.append(mask_ap([p], [g], 0.5))
+    w = int(np.argmin(per_img))                                   # the worst image
+    im = val_imgs[w].permute(1, 2, 0).numpy()
+    p = preds_ft[w]
+    keep = p["scores"] >= 0.5
+    pm = p["masks"][keep]
+    gm = val_gts[w]["masks"]
+    if len(pm) > 0 and len(gm) > 0:
+        ious = mask_iou(pm, gm)                                   # (predictions, GT people)
+    else:
+        ious = np.zeros((len(pm), len(gm)))
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     day3.draw_instances(axes[0], im, gm, val_gts[w]["boxes"], title=f"GT ({len(gm)} people)")
     day3.draw_instances(axes[1], im, pm, p["boxes"][keep], p["scores"][keep], title=f"prediction (mask AP50 {per_img[w]:.2f})")
     err = np.zeros(im.shape)
-    union_p, union_g = pm.any(0) if len(pm) else np.zeros(im.shape[:2], bool), gm.any(0)
+    if len(pm) > 0:
+        union_p = pm.any(0)                                       # pixels covered by any predicted mask
+    else:
+        union_p = np.zeros(im.shape[:2], bool)
+    union_g = gm.any(0)                                           # pixels covered by any GT mask
     err[union_p & union_g] = 0.75; err[union_p & ~union_g] = [0.9, 0.15, 0.15]; err[~union_p & union_g] = [0.15, 0.35, 0.95]
     axes[2].imshow(err); axes[2].axis("off"); axes[2].set_title("red: extra pixels, blue: missed pixels")
     plt.tight_layout(); plt.show()

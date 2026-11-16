@@ -1,0 +1,4 @@
+# False matches of tools/check_api.py in the Day 3 notebooks (format: notebook key  # reason).
+# None needed. The NumPy-array calls the checker reads as tensor methods (xs.min(), a.reshape(-1, order="F"),
+# img.transpose(2, 0, 1), c.std(), pm.any(0)) are boxed under the Tensor.* entries on purpose: those entries
+# also describe the NumPy method of the same name.
