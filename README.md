@@ -148,7 +148,7 @@ When opening a notebook directly from GitHub in Google Colab, Colab only loads t
 
 ```python
 %cd /content
-!git clone https://github.com /content/DSR_cv-class
+!git clone https://github.com/GenomZ/cv-class
 
 %cd /content/DSR_cv-class
 !pip install -q -r requirements.txt
