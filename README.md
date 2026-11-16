@@ -137,3 +137,24 @@ labs.catalog()                  # the list, with the notebook each one belongs t
 The course is a PyTorch rewrite and refresh of three TensorFlow courses from 2024
 (`GenomZ/DL-Image-B42`, `GenomZ/Advanced-CV`, `GenomZ/Advanced_Computer_Vision`); the
 topic-by-topic mapping is in `docs/01-source-topic-inventory.md` and `docs/03-refresh-map.md`.
+
+### Running on Google Colab
+
+When opening a notebook directly from GitHub in Google Colab, Colab only loads the `.ipynb` file without the helper package (`notebooks/cvcourse`) or datasets. To set up the full environment in Colab:
+
+1. Open any notebook from `notebooks/` in [Google Colab](https://google.com).
+2. *(Optional)* Switch to a GPU runtime via **Runtime > Change runtime type > T4 GPU**.
+3. Insert a new code cell at the **very top** of the notebook (above the first import cell) and run:
+
+```python
+%cd /content
+!git clone https://github.com /content/DSR_cv-class
+
+%cd /content/DSR_cv-class
+!pip install -q -r requirements.txt
+!python tools/download_data.py
+
+%cd /content/DSR_cv-class/notebooks
+```
+
+4. Run the rest of the notebook cells from top to bottom. *(Note: Colab resets temporary storage when a runtime disconnects, so re-run this top setup cell whenever you start a new session.)*
