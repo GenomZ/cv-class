@@ -12,8 +12,9 @@ seg      : segmentation metrics and losses (Dice, IoU), upsampling references
 shapes   : synthetic "shapes" dataset with boxes and masks (no download)
 tests    : checkers for the exercises (`tests.check_iou(my_iou)` etc.)
 labs     : interactive browser labs embedded in the notebooks (`labs.show("conv-playground")`)
+practical: the practical track's toolkit (PyTorch): `from cvcourse import practical as P`
 """
 
-from . import viz, convops, boxes, seg, shapes, tests, labs, apiref  # noqa: F401
+from . import viz, convops, boxes, seg, shapes, tests, labs, apiref, practical  # noqa: F401
 
-__all__ = ["viz", "convops", "boxes", "seg", "shapes", "tests", "labs", "apiref"]
+__all__ = ["viz", "convops", "boxes", "seg", "shapes", "tests", "labs", "apiref", "practical"]

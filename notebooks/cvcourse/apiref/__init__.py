@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 
 __all__ = ["E", "Entry", "get", "has", "keys", "box", "show", "search", "index"]
 
-_MODULES = ["_day0", "_day1a", "_day1b", "_day1b_02", "_day1b_03", "_day1b_04", "_day2", "_day3"]   # _day1a = D1-01, _day1b = D1-02 .. D1-04
+_MODULES = ["_day0", "_day1a", "_day1b", "_day1b_02", "_day1b_03", "_day1b_04", "_day2", "_day3", "_p1", "_p2", "_p3", "_p4", "_p5"]   # _day1a = D1-01, _day1b = D1-02 .. D1-04
 # key prefix -> heading used by index()
 _GROUPS = [
     ("Tensor.", "Tensor methods and attributes"), ("torch.", "torch"), ("nn.", "torch.nn (layers)"),
