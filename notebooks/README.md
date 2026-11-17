@@ -27,3 +27,16 @@ Work through them in order; each one is a 75-90 minute block.
   `cvcourse/labs/index.html`.
 * `solutions/` has every notebook with the exercises filled in.
 * `cvcourse/` is the helper package the notebooks import; `assets/` holds three fallback images.
+
+## Practical track (P1 to P5)
+
+Five shorter, simpler lessons: run ready-made networks, change their settings, and build
+models by typing layers from a table. Each has a solution in `solutions/`.
+
+| Lesson | Notebook | You do |
+|---|---|---|
+| 1 | `P1-dense-vs-conv-mnist` | run and compare a dense network and a small CNN on MNIST; change the settings |
+| 2 | `P2-vgg` | look inside VGG16; train a mini-VGG on CIFAR-10 |
+| 3 | `P3-googlenet` | build GoogLeNet from Inception blocks, with a check after every step |
+| 4 | `P4-unet` | assemble a U-Net block by block; train a small one |
+| 5 | `P5-transfer-learning` | adapt a pretrained network to 300 pet photos |
