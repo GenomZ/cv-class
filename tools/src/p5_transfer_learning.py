@@ -152,6 +152,9 @@ CELLS = [
     def load_pets(breeds, photos_per_class, val_per_class, image_size):
         \"\"\"Training and validation loaders for a few Oxford-IIIT Pet breeds.\"\"\"
         folder = torchkit.data_root() / "oxford-iiit-pet" / "images"
+        if len(list(folder.glob("*.jpg"))) == 0:        # no photos at all: they were never downloaded
+            raise FileNotFoundError(f"No pet photos in {folder}. Download them once (about 800 MB) with: "
+                                    f"python tools/download_data.py pet   (run it in the course folder)")
         prepare = preparation(image_size)
         train_files = []                                # train_files[label] = the training files of that breed
         val_files = []
@@ -601,10 +604,15 @@ CELLS = [
     ### Name the breed in a photo file
 
     `predict_photo` is what you would use in an application: read one photo file, prepare it exactly like the
-    training photos, and let the network answer. Three new things in it:
+    training photos, and let the network answer. Four new things in it:
 
     * `x.unsqueeze(0)` turns one photo (3 x 128 x 128) into a batch of one photo (1 x 3 x 128 x 128): networks
       always take batches;
+    * `batch.to(next(model.parameters()).device)` puts the photo on the same **device** as the network. A device
+      is where the numbers are kept and computed: the processor (`cpu`) or a graphics card (`cuda`, or `mps` on
+      an Apple computer). `P.train` moves the network to the graphics card when there is one, and a network can
+      only read a photo that is on its own device. `next(model.parameters())` is the first weight tensor of the
+      network and `.device` says where it is. On a computer without a graphics card the line changes nothing;
     * `model.eval()` switches the network to **evaluation mode**: the BatchNorm layers then use the averages they
       stored during training instead of those of the current batch, so the answer for a photo does not depend on
       the other photos (`P.train` and `P.evaluate` do this for you); `torch.no_grad()` tells PyTorch not to
@@ -612,14 +620,16 @@ CELLS = [
     * `scores.softmax(dim=1)` turns the 5 scores into 5 **probabilities**: numbers between 0 and 1 that add up to
       1. The highest one is the network's **confidence** in its answer.
     """),
-    api("Tensor.unsqueeze", "Module.eval", "torch.no_grad", "Tensor.softmax", "Tensor.argmax"),
+    api("Tensor.unsqueeze", "Tensor.to", "Module.parameters", "Module.eval", "torch.no_grad", "Tensor.softmax",
+        "Tensor.argmax"),
     code("""
     def predict_photo(model, path, breeds, image_size):
         \"\"\"The breed the model sees in one photo file, and how sure it is (0 to 1).\"\"\"
         photo = Image.open(path).convert("RGB")
         x = preparation(image_size)(photo)              # the same preparation as the training photos: 3 x H x W
         batch = x.unsqueeze(0)                          # a batch of one photo: 1 x 3 x H x W
-        model.eval()                                    # evaluation mode
+        batch = batch.to(next(model.parameters()).device)   # put the photo where the model is: CPU or graphics card
+        model.eval()                                   # evaluation mode
         with torch.no_grad():                           # only answering, no training
             scores = model(batch)                       # 1 x 5 scores
         probabilities = scores.softmax(dim=1)[0]        # 5 numbers between 0 and 1 that add up to 1
