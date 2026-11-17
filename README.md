@@ -15,7 +15,7 @@ You need: Python 3.10 or newer, about 6 GB of free disk, and no GPU (everything 
 laptop CPU; a GPU only makes the training cells faster). Prerequisites: Python, NumPy, and
 the basics of neural networks and backpropagation.
 
-## Practical track: five short, run-first lessons
+## Practical track: eight short, run-first lessons
 
 A second, simpler way through the material. You run ready-made networks, change their
 settings and watch what happens; where you do build something, you type layers from a table
@@ -29,12 +29,17 @@ deep learning.
 | 3 | `P3-googlenet` | Build GoogLeNet from Inception blocks, step by step from a table, with a check and a diagram after every step. |
 | 4 | `P4-unet` | Assemble a U-Net (encoder, decoder, skip connections) block by block, then train a small one. |
 | 5 | `P5-transfer-learning` | Take a pretrained network, give it a new classifier, train it on 300 pet photos. |
+| 6 | `P6-googlenet-auxiliary-classifiers` | Add the two auxiliary classifiers that lesson 3 left out of GoogLeNet: build the small extra head, return three outputs, combine three losses, then train with and without them. |
+| 7 | `P7-object-detection-boxes` | Find objects with boxes: what a box and IoU are, a tiny detector for one shape per picture, a grid detector with a score threshold and NMS for several shapes, then a pretrained detector on street photos. |
+| 8 | `P8-vision-transformer` | Cut a picture into patches, turn them into embeddings, watch attention at work, then assemble and train a tiny vision transformer. |
+| bonus | `E1-flatten-branches-and-sobel-filters` | Two experiments after P1: a fully connected network that flattens the picture in several ways at once, and a CNN that starts from hand-made Sobel filters instead of random ones. No code to write. |
+| bonus | `E2-fft-instead-of-convolution` | One experiment after P1 and E1: a layer that multiplies the picture's spectrum (FFT) by learned weights instead of sliding a filter, put in the place of every convolution and compared with the same CNN. No code to write. |
 
 Every lesson uses the same small toolkit (`from cvcourse import practical as P`): a diagram
 of any model you build (`P.show_model`), its cost in parameters and time (`P.cost`), a
 predefined training run with live curves (`P.train`) and a leaderboard of the versions you
-tried (`P.leaderboard`). MNIST and CIFAR-10 download themselves on first use; lesson 5 needs
-the Pet photos from `python tools/download_data.py`.
+tried (`P.leaderboard`). MNIST and CIFAR-10 download themselves on first use; lessons 4, 5 and 8
+need the Pet photos and lesson 7 the street photos from `python tools/download_data.py`.
 
 ## Students: start here
 
