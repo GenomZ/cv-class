@@ -386,6 +386,13 @@ def _():
     assert len(fig.axes[0].lines) == 4
     loss, acc = P.evaluate(trained, vl)
     assert loss > 0 and abs(acc - h1["val_acc"][-1]) < 1e-9
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        h5 = P.train(cnn(), tl, vl, epochs=2, verbose=False, name="quiet")
+    assert buf.getvalue() == "", "verbose=False must print nothing"
+    assert h5["val_acc"] == h1["val_acc"], "verbose=False changed the result"
 
 
 @check("train: per-pixel classification (segmentation-style outputs)")
