@@ -15,6 +15,27 @@ You need: Python 3.10 or newer, about 6 GB of free disk, and no GPU (everything 
 laptop CPU; a GPU only makes the training cells faster). Prerequisites: Python, NumPy, and
 the basics of neural networks and backpropagation.
 
+## Practical track: five short, run-first lessons
+
+A second, simpler way through the material. You run ready-made networks, change their
+settings and watch what happens; where you do build something, you type layers from a table
+and a check tells you in plain words whether they are right. Start here if you are new to
+deep learning.
+
+| Lesson | Notebook | What you do |
+|---|---|---|
+| 1 | `P1-dense-vs-conv-mnist` | Run a fully connected network and a small CNN on handwritten digits, compare them, then change layers, feature maps, kernel size, padding, stride. No code to write. |
+| 2 | `P2-vgg` | See all 16 layers of VGG16 and what they cost, then train a mini-VGG on CIFAR-10 photos. No code to write. |
+| 3 | `P3-googlenet` | Build GoogLeNet from Inception blocks, step by step from a table, with a check and a diagram after every step. |
+| 4 | `P4-unet` | Assemble a U-Net (encoder, decoder, skip connections) block by block, then train a small one. |
+| 5 | `P5-transfer-learning` | Take a pretrained network, give it a new classifier, train it on 300 pet photos. |
+
+Every lesson uses the same small toolkit (`from cvcourse import practical as P`): a diagram
+of any model you build (`P.show_model`), its cost in parameters and time (`P.cost`), a
+predefined training run with live curves (`P.train`) and a leaderboard of the versions you
+tried (`P.leaderboard`). MNIST and CIFAR-10 download themselves on first use; lesson 5 needs
+the Pet photos from `python tools/download_data.py`.
+
 ## Students: start here
 
 **1. Get the code and install** (once, before day 1; about 10 minutes plus downloads)

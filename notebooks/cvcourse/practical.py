@@ -26,7 +26,7 @@ summary(model, input_shape, depth=None) -> list of row dicts
 output_shape(model, input_shape) -> tuple
 cost(model, input_shape, name=None, batch_size=32, epoch_images=10000) -> dict
 compare(models, input_shape, histories=None) -> list of row dicts (also draws a bar chart)
-train(model, train_loader, val_loader=None, epochs=3, lr=1e-3, optimizer="adam", max_minutes=None, live=True, seed=0, name=None) -> History
+train(model, train_loader, val_loader=None, epochs=3, lr=1e-3, optimizer="adam", max_minutes=None, live=True, seed=0, name=None, verbose=True) -> History
 evaluate(model, loader) -> (loss, accuracy in %)
 predict(model, images) -> predicted class indices
 plot_history(history or {name: history}) -> Figure
@@ -65,7 +65,7 @@ from matplotlib.path import Path as MplPath
 from .torchkit import IMAGENET_MEAN, IMAGENET_STD, data_root
 
 __all__ = [
-    "setup", "get_mnist", "get_cifar10", "ImageSet", "loaders", "show_samples", "show_model", "summary",
+    "setup", "get_mnist", "get_fashion_mnist", "get_cifar10", "ImageSet", "loaders", "show_samples", "show_model", "summary",
     "output_shape", "cost", "compare", "train", "evaluate", "predict", "plot_history", "show_predictions",
     "confusion", "show_filters", "show_feature_maps", "remember", "leaderboard", "forget", "History",
     "ModelShapeError", "KIND_COLORS", "MNIST_MEAN", "MNIST_STD", "CIFAR10_MEAN", "CIFAR10_STD",
@@ -306,6 +306,13 @@ def _raw(name: str):
         te = datasets.MNIST(str(root), train=False, download=True)
         out = (tr.data.unsqueeze(1), tr.targets.clone(), te.data.unsqueeze(1), te.targets.clone(),
                [str(i) for i in range(10)])
+    elif name == "fashion":
+        if not (root / "FashionMNIST" / "raw" / "t10k-labels-idx1-ubyte").exists():
+            print("downloading FashionMNIST (about 30 MB) into data/ - only the first time")
+        tr = datasets.FashionMNIST(str(root), train=True, download=True)
+        te = datasets.FashionMNIST(str(root), train=False, download=True)
+        out = (tr.data.unsqueeze(1), tr.targets.clone(), te.data.unsqueeze(1), te.targets.clone(),
+               list(tr.classes))
     elif name == "cifar10":
         if not (root / "cifar-10-batches-py" / "test_batch").exists():
             print("downloading CIFAR-10 (about 170 MB) into data/ - only the first time")
@@ -360,6 +367,30 @@ def get_mnist(n_train: int | None = 10000, n_val: int | None = 2000, batch_size:
     tl, vl = loaders(train_set, val_set, batch_size, seed)
     if verbose:
         print(f"{name}: {len(train_set):,} training images, {len(val_set):,} validation images, "
+              f"each 1 x 28 x 28, 10 classes; batches of {batch_size}")
+    return tl, vl, classes
+
+
+FASHION_MEAN, FASHION_STD = (0.2860,), (0.3530,)
+
+
+def get_fashion_mnist(n_train: int | None = 10000, n_val: int | None = 2000, batch_size: int = 64, seed: int = 0,
+                      verbose: bool = True):
+    """FashionMNIST clothes -> (train_loader, val_loader, classes). A drop-in replacement for get_mnist.
+
+    Same format as MNIST (1 x 28 x 28 grey images, 10 classes, 60 000 / 10 000 images) but harder:
+    T-shirt/top, Trouser, Pullover, Dress, Coat, Sandal, Shirt, Sneaker, Bag, Ankle boot.
+    A network built for MNIST works on it without any change.
+    """
+    x_tr, y_tr, x_te, y_te, classes = _raw("fashion")
+    i_tr, i_va = _pick(len(x_tr), n_train, seed), _pick(len(x_te), n_val, seed + 1)
+    xt = _normalise(x_tr[i_tr], FASHION_MEAN, FASHION_STD)
+    xv = _normalise(x_te[i_va], FASHION_MEAN, FASHION_STD)
+    train_set = ImageSet(xt, y_tr[i_tr], classes, FASHION_MEAN, FASHION_STD, name="FashionMNIST")
+    val_set = ImageSet(xv, y_te[i_va], classes, FASHION_MEAN, FASHION_STD, name="FashionMNIST")
+    tl, vl = loaders(train_set, val_set, batch_size, seed)
+    if verbose:
+        print(f"FashionMNIST: {len(train_set):,} training images, {len(val_set):,} validation images, "
               f"each 1 x 28 x 28, 10 classes; batches of {batch_size}")
     return tl, vl, classes
 
@@ -2140,9 +2171,10 @@ def _history_figure(hists: dict, title: str | None = None) -> _Figure:
 class _Live:
     """Epoch lines and curves that update in place under a notebook cell; plain prints elsewhere."""
 
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, quiet: bool = False):
+        self.quiet = quiet
         self.notebook = _shell() is not None
-        self.enabled = enabled and self.notebook
+        self.enabled = enabled and self.notebook and not quiet
         self.lines: list = []
         if self.enabled:
             from IPython.display import Pretty, display
@@ -2151,6 +2183,8 @@ class _Live:
 
     def log(self, line: str) -> None:
         self.lines.append(line)
+        if self.quiet:
+            return
         if self.enabled:
             from IPython.display import Pretty
             self.text.update(Pretty("\n".join(self.lines)))
@@ -2162,13 +2196,13 @@ class _Live:
             from IPython.display import Image
             fig = _history_figure({hist["name"]: hist}, hist["name"])
             self.plot.update(Image(data=_png(fig)))
-        elif final and self.notebook:
+        elif final and self.notebook and not self.quiet:
             _show(_history_figure({hist["name"]: hist}, hist["name"]))
 
 
 def train(model: nn.Module, train_loader, val_loader=None, epochs: int = 3, lr: float = 1e-3, optimizer="adam",
           max_minutes: float | None = None, live: bool = True, seed: int = 0, name: str | None = None,
-          loss_fn=None, weight_decay: float = 0.0):
+          loss_fn=None, weight_decay: float = 0.0, verbose: bool = True):
     """Train a classifier and draw its training and validation curves. Returns a History (a dict).
 
     Every epoch shows the model all training images once (in batches), adjusting the weights after
@@ -2180,6 +2214,7 @@ def train(model: nn.Module, train_loader, val_loader=None, epochs: int = 3, lr: 
     max_minutes: stop early after this many minutes (the last epoch is then validated as it is).
     seed: fixes the shuffling order and dropout, so a run can be repeated exactly (the initial weights
     come from torch.manual_seed before the model was built). loss_fn: default cross-entropy.
+    verbose=False prints and draws nothing (for loops that train many models; read the returned History).
     Works for image classification and also per-pixel classification (accuracy over pixels).
     """
     loss_fn = loss_fn or nn.CrossEntropyLoss()
@@ -2200,7 +2235,7 @@ def train(model: nn.Module, train_loader, val_loader=None, epochs: int = 3, lr: 
                    total_seconds=0.0, best_val_acc=None, best_epoch=None, lr=lr, optimizer=opt_name,
                    batch_size=getattr(train_loader, "batch_size", None), n_train=n_train, params=_count_params(model),
                    input_shape=in_shape, stopped_early=False)
-    live_out = _Live(live)
+    live_out = _Live(live, quiet=not verbose)
     live_out.log(f"training '{name}': {epochs} epoch(s) over {n_train:,} images in batches of {hist['batch_size']}, "
                  f"{opt_name} with learning rate {lr}")
     t_start = time.time()
