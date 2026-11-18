@@ -28,9 +28,9 @@ Work through them in order; each one is a 75-90 minute block.
 * `solutions/` has every notebook with the exercises filled in.
 * `cvcourse/` is the helper package the notebooks import; `assets/` holds three fallback images.
 
-## Practical track (P1 to P5)
+## Practical track (P1 to P8)
 
-Five shorter, simpler lessons: run ready-made networks, change their settings, and build
+Eight shorter, simpler lessons: run ready-made networks, change their settings, and build
 models by typing layers from a table. Each has a solution in `solutions/`.
 
 | Lesson | Notebook | You do |
@@ -40,3 +40,8 @@ models by typing layers from a table. Each has a solution in `solutions/`.
 | 3 | `P3-googlenet` | build GoogLeNet from Inception blocks, with a check after every step |
 | 4 | `P4-unet` | assemble a U-Net block by block; train a small one |
 | 5 | `P5-transfer-learning` | adapt a pretrained network to 300 pet photos |
+| 6 | `P6-googlenet-auxiliary-classifiers` | add the two auxiliary classifiers to the GoogLeNet of P3; train with and without them |
+| 7 | `P7-object-detection-boxes` | boxes and IoU; a tiny detector for one shape per picture; a grid detector with NMS for several; a pretrained detector on street photos |
+| 8 | `P8-vision-transformer` | patches, embeddings and attention; assemble and train a tiny vision transformer |
+| bonus | `E1-flatten-branches-and-sobel-filters` | two experiments after P1: several ways to flatten side by side in one dense network; a CNN started from Sobel filters against a random start |
+| bonus | `E2-fft-instead-of-convolution` | one experiment after P1 and E1: an FFT layer (learned weights per wave) in the place of every convolution, compared with the same CNN |
